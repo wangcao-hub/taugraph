@@ -24,14 +24,15 @@ If a model decides every step and gets each one right 95% of the time, a 3-step 
 
 ## Where it sits
 
-|               | Pi                              | LangGraph                                 | taugraph                                      |
-| ------------- | ------------------------------- | ----------------------------------------- | --------------------------------------------- |
-| Kernel        | single-agent loop (LLM ↔ tools) | stateful graph with channels and reducers | graph scheduler + typed state                 |
-| Orchestration | extension                       | core                                      | core                                          |
-| State         | message transcript              | channels, checkpoint per step             | one schema-checked, frozen JSON object        |
-| Log           | append-only session             | checkpoints in a persistence backend      | append-only event stream with state snapshots |
-| LLM / tools   | built in                        | bring your own, often LangChain           | plugin nodes, none in the kernel              |
-| Runtime deps  | provider SDKs                   | LangChain core and friends                | **none**                                      |
+|                 | Pi                              | LangGraph                                 | taugraph                                      |
+| --------------- | ------------------------------- | ----------------------------------------- | --------------------------------------------- |
+| Kernel          | single-agent loop (LLM ↔ tools) | stateful graph with channels and reducers | graph scheduler + typed state                 |
+| Orchestration   | extension                       | core                                      | core                                          |
+| State           | message transcript              | channels, checkpoint per step             | one schema-checked, frozen JSON object        |
+| Pause for input | the conversation itself         | `interrupt()` + a checkpointer            | `ctx.interrupt()`, resumed from the trace     |
+| Log             | append-only session             | checkpoints in a persistence backend      | append-only event stream with state snapshots |
+| LLM / tools     | built in                        | bring your own, often LangChain           | plugin nodes, none in the kernel              |
+| Runtime deps    | provider SDKs                   | LangChain core and friends                | **none**                                      |
 
 ## Rules of the kernel
 
@@ -41,7 +42,7 @@ If a model decides every step and gets each one right 95% of the time, a 3-step 
 4. A run is a serializable trace. Replay it at any time, with any node or model swapped.
 5. No hidden magic. Side effects are recorded as explicit events, and nodes that change the world declare `effect: "write"` so a replay never repeats them.
 6. Sync first, async optional. `runSync` never touches a Promise; no async runtime is assumed.
-7. Zero runtime dependencies. Works in Node ≥ 22, Bun, Deno and browsers.
+7. Zero runtime dependencies. Works in Node ≥ 22, Bun, Deno and browsers (CI runs Node 22 and 24; Bun, Deno and Chrome were checked by hand for 0.2.0).
 
 These are enforced by tests (`test/architecture.test.ts`), not only by convention.
 

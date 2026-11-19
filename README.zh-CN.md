@@ -24,14 +24,15 @@ npm install taugraph zod     # 也可以用任何 Standard Schema 库：valibot�
 
 ## 定位
 
-|            | Pi                              | LangGraph                     | taugraph                             |
-| ---------- | ------------------------------- | ----------------------------- | ------------------------------------ |
-| 内核       | 单 Agent 思考循环（LLM ↔ 工具） | 带 channel / reducer 的状态图 | 图调度 + 类型化状态                  |
-| 编排       | 扩展                            | 内核                          | 内核                                 |
-| 状态       | 消息 transcript                 | channel，每步一个 checkpoint  | 一个经 schema 校验、冻结的 JSON 对象 |
-| 日志       | 只追加的 session                | 持久化后端里的 checkpoint     | 只追加的事件流，附带状态快照         |
-| LLM / 工具 | 内置                            | 自带，常用 LangChain          | 插件节点，内核里没有                 |
-| 运行时依赖 | 各家模型 SDK                    | LangChain core 等             | **无**                               |
+|              | Pi                              | LangGraph                     | taugraph                             |
+| ------------ | ------------------------------- | ----------------------------- | ------------------------------------ |
+| 内核         | 单 Agent 思考循环（LLM ↔ 工具） | 带 channel / reducer 的状态图 | 图调度 + 类型化状态                  |
+| 编排         | 扩展                            | 内核                          | 内核                                 |
+| 状态         | 消息 transcript                 | channel，每步一个 checkpoint  | 一个经 schema 校验、冻结的 JSON 对象 |
+| 暂停等待输入 | 对话本身                        | `interrupt()` + checkpointer  | `ctx.interrupt()`，从 trace 恢复     |
+| 日志         | 只追加的 session                | 持久化后端里的 checkpoint     | 只追加的事件流，附带状态快照         |
+| LLM / 工具   | 内置                            | 自带，常用 LangChain          | 插件节点，内核里没有                 |
+| 运行时依赖   | 各家模型 SDK                    | LangChain core 等             | **无**                               |
 
 ## 内核戒律
 
@@ -41,7 +42,7 @@ npm install taugraph zod     # 也可以用任何 Standard Schema 库：valibot�
 4. 一次执行就是一条可序列化的 trace，随时 replay，可替换任意节点或模型。
 5. 没有隐式魔法：副作用都以显式事件记录；会改变外部世界的节点声明 `effect: "write"`，回放永远不会重复执行它。
 6. 同步优先，异步可选。`runSync` 全程不碰 Promise，内核不绑定任何异步运行时。
-7. 零运行时依赖。支持 Node ≥ 22、Bun、Deno 和浏览器。
+7. 零运行时依赖。支持 Node ≥ 22、Bun、Deno 和浏览器（CI 覆盖 Node 22 和 24；0.2.0 发布时手工验证过 Bun、Deno 和 Chrome）。
 
 这些规则由测试（`test/architecture.test.ts`）强制执行，不只是约定。
 

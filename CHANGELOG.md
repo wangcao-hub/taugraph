@@ -4,7 +4,9 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
-## [0.2.0]
+## [0.2.0] - 2026-11-19
+
+First release on npm.
 
 ### Added
 
@@ -22,7 +24,9 @@ All notable changes to this project are documented here. The format follows [Kee
 - `RunResult` is now a union of `CompletedRun` and `PausedRun`; check `status` before reading `pending`.
 - Removed the conventional `human_pause` plugin event type; pausing is now the kernel's `pause` event.
 
-## [0.1.0]
+## [0.1.0] - 2026-11-19
+
+GitHub only, not published to npm.
 
 ### Added
 
@@ -33,3 +37,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Replay: `graph.replay` with node overrides and `recorded` / `live` modes.
 - Plugin nodes (`taugraph/nodes`): `CodeNode`, `LLMNode` with a provider-agnostic `LLMModel` contract and structured output.
 - Examples: quick start, retrieval with retry loop, OpenAI-compatible adapter.
+
+[Unreleased]: https://github.com/wangcao-hub/taugraph/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/wangcao-hub/taugraph/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/wangcao-hub/taugraph/releases/tag/v0.1.0
