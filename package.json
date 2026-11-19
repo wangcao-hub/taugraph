@@ -1,0 +1,71 @@
+{
+  "name": "taugraph",
+  "version": "0.1.0",
+  "description": "Minimal typed agent graph harness: a graph + typed-state kernel with append-only traces and replay. Zero runtime dependencies.",
+  "keywords": [
+    "agent",
+    "llm",
+    "graph",
+    "orchestration",
+    "workflow",
+    "state-machine",
+    "trace",
+    "replay",
+    "standard-schema",
+    "zod"
+  ],
+  "license": "MIT",
+  "author": "wangcao-hub (https://github.com/wangcao-hub)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wangcao-hub/taugraph.git"
+  },
+  "homepage": "https://github.com/wangcao-hub/taugraph#readme",
+  "bugs": {
+    "url": "https://github.com/wangcao-hub/taugraph/issues"
+  },
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./nodes": {
+      "types": "./dist/nodes/index.d.ts",
+      "import": "./dist/nodes/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "README.zh-CN.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "packageManager": "pnpm@9.15.9",
+  "scripts": {
+    "build": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "format": "biome check --write .",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "pnpm typecheck && pnpm lint && pnpm test",
+    "example:quickstart": "tsx examples/quickstart.ts",
+    "example:rag": "tsx examples/rag-retry.ts",
+    "prepublishOnly": "pnpm check && pnpm build"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2",
+    "@types/node": "^24",
+    "tsx": "^4",
+    "typescript": "^7",
+    "vitest": "^5",
+    "zod": "^4"
+  }
+}
