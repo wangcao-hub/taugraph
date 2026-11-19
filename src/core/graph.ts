@@ -30,13 +30,15 @@ export function createGraph<S, I, K extends string>(
   const planResume = (trace: Trace, value: unknown, options: ResumeOptions): ResumePlan => {
     const events = assertTrace(trace);
     const point = resumePoint(events);
+    const isReplay = (events[0] as Trace[number]).meta?.replayOf !== undefined;
+    const blockWrites = isReplay && options.allowWrites !== true;
     if (value !== undefined && point.kind !== "paused") {
       throw new TaugraphError(
         "NOT_RESUMABLE",
         "The run is not waiting for a value. To continue an interrupted trace, call resume(trace) without a value.",
       );
     }
-    if (point.kind === "start") return { trace: events, point, value: undefined };
+    if (point.kind === "start") return { trace: events, point, value: undefined, blockWrites };
     const node = graph.nodes[point.nodeId];
     if (!Object.hasOwn(graph.nodes, point.nodeId) || !node) {
       throw new TaugraphError(
@@ -52,7 +54,7 @@ export function createGraph<S, I, K extends string>(
       );
     }
     const json = value === undefined ? undefined : toJson(value, "Resume value is not plain JSON");
-    return { trace: events, point, value: json };
+    return { trace: events, point, value: json, blockWrites };
   };
 
   return Object.freeze({

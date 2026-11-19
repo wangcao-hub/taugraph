@@ -51,6 +51,8 @@ export interface ResumePlan {
   readonly point: ResumePoint;
   /** Frozen JSON value for a paused step, otherwise undefined. */
   readonly value: unknown;
+  /** The trace is a replay and the caller did not pass allowWrites: keep blocking writes. */
+  readonly blockWrites: boolean;
 }
 
 export interface ExecuteParams<S> {
@@ -96,6 +98,7 @@ export function* execute<S>(params: ExecuteParams<S>): Effects<RunResult<S>> {
   const maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
   const runId = resume ? (resume.trace[0] as Trace[number]).runId : (options.runId ?? randomId());
   const log = new TraceLog(runId, options.onEvent, resume?.trace);
+  const blockWrites = replay ? !replay.allowWrites : resume?.blockWrites === true;
 
   try {
     const start = resume ? yield* beginResume(graph, log, resume) : yield* beginRun(graph, log, params.input, replay);
@@ -114,7 +117,8 @@ export function* execute<S>(params: ExecuteParams<S>): Effects<RunResult<S>> {
             `Run exceeded maxSteps (${maxSteps}). The graph may loop forever; add an exit condition or raise maxSteps.`,
           );
         }
-        const outcome = yield* runStep({ graph, log, runId, signal, replay, nodeId: current, step, state, ...carry });
+        const params = { graph, log, runId, signal, replay, blockWrites, nodeId: current, step, state, ...carry };
+        const outcome = yield* runStep(params);
         carry = { values: undefined, recovered: false };
         if (outcome.kind === "pause") {
           log.append({
@@ -228,6 +232,8 @@ interface StepParams<S> {
   readonly runId: string;
   readonly signal: AbortSignal;
   readonly replay: ReplayPlan<S> | undefined;
+  /** True during a replay, and when resuming a replay, unless allowWrites was passed. */
+  readonly blockWrites: boolean;
   readonly nodeId: string;
   readonly step: number;
   readonly state: S;
@@ -253,7 +259,7 @@ function* runStep<S>(p: StepParams<S>): Effects<StepOutcome<S>> {
 
   const node = override ?? (graph.nodes[nodeId] as Node<S>);
   const source = override ? "override" : "live";
-  if (replay && node.effect === "write" && !replay.allowWrites) {
+  if (p.blockWrites && node.effect === "write") {
     throw new TaugraphError(
       "WRITE_BLOCKED",
       `Replay reached write node "${nodeId}" (step ${step}), which would run live. Override it with a mock, or pass allowWrites: true to really run it.`,

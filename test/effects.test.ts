@@ -220,3 +220,39 @@ describe("onEvent is a write-ahead sink", () => {
     expect(attempts).toBe(1);
   });
 });
+
+describe("resuming a replay", () => {
+  it("keeps blocking write nodes unless allowWrites is passed", async () => {
+    let placed = 0;
+    const graph = createGraph(schema, {
+      start: "ask",
+      nodes: {
+        ask: (s, ctx) => ({ ...s, item: ctx.interrupt<string>("which item?") }),
+        place: CodeNode(
+          (s) => {
+            placed++;
+            return { ...s, orderId: `order-${placed}` };
+          },
+          { effect: "write" },
+        ),
+      },
+      edges: [{ from: "ask", to: "place" }],
+      endNodes: ["place"],
+    });
+    const done = await graph.resume((await graph.run({ item: "" })).trace, "lamp");
+    // The input differs, so the human step pauses inside the replay instead of reusing the answer.
+    const replay = await graph.replay(fromInput(done.trace, { item: "x" }));
+    expect(replay.status).toBe("paused");
+
+    const error = await failure(graph.resume(replay.trace, "desk"));
+    expect(error.code).toBe("WRITE_BLOCKED");
+    expect(placed).toBe(1);
+    const real = await graph.resume(replay.trace, "desk", { allowWrites: true });
+    expect(real.state.orderId).toBe("order-2");
+  });
+});
+
+/** The same trace with a different run input, so a replay diverges from the first step. */
+function fromInput(trace: Trace, input: unknown): Trace {
+  return trace.map((e, i) => (i === 0 ? { ...e, input } : e));
+}

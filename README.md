@@ -157,7 +157,7 @@ On resume the waiting node runs again from the top and `ctx.interrupt` returns `
 CodeNode(placeOrder, { effect: "write" });
 ```
 
-`write` marks a node whose call changes the outside world. It is recorded on `enter` events, and replay refuses to run it live (`WRITE_BLOCKED`) unless you override it with a mock or pass `allowWrites: true`. Undeclared nodes count as `read`.
+`write` marks a node whose call changes the outside world. It is recorded on `enter` events, and replay refuses to run it live (`WRITE_BLOCKED`) unless you override it with a mock or pass `allowWrites: true`. This also holds when you resume a replay that paused. Undeclared nodes count as `read`.
 
 ### Replay
 

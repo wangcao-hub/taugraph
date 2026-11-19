@@ -157,7 +157,7 @@ const result = await graph.resume(trace, value); // 同一个 runId，追加到�
 CodeNode(placeOrder, { effect: "write" });
 ```
 
-`write` 标记调用会改变外部世界的节点。它会记录在 `enter` 事件里；回放时内核拒绝实际执行它（`WRITE_BLOCKED`），除非用 mock 覆盖它，或者显式传 `allowWrites: true`。没声明的节点按 `read` 处理。
+`write` 标记调用会改变外部世界的节点。它会记录在 `enter` 事件里；回放时内核拒绝实际执行它（`WRITE_BLOCKED`），除非用 mock 覆盖它，或者显式传 `allowWrites: true`。恢复一条停在半路的回放 trace 时同样如此。没声明的节点按 `read` 处理。
 
 ### Replay
 

@@ -73,6 +73,7 @@ run_end(completed)
 - Ends with `run_end(paused)`: `value` is delivered to the pending step, which runs again from the top.
 - Ends without `run_end`: continues from the last step event. A finished step routes on; an unfinished step runs again with `ctx.meta.recovered === true`, except that an unfinished `write` step needs `allowWrites: true`. Passing a value here is rejected.
 - Ends with `run_end(completed | failed)`: rejected. Use `replay` to run it again.
+- The trace is a replay (`run_start.meta.replayOf` is set): `write` nodes stay blocked (`WRITE_BLOCKED`) unless `allowWrites: true` is passed.
 
 ## Replay contract
 
