@@ -51,6 +51,44 @@ describe("type inference", () => {
     });
   });
 
+  it("narrows run results by status", () => {
+    const graph = createGraph(schema, { start: "a", nodes: { a: (s) => s }, endNodes: ["a"] });
+    const check = async () => {
+      const result = await graph.run({ question: "q" });
+      // @ts-expect-error pending only exists on paused runs
+      void result.pending;
+      if (result.status === "paused") {
+        expectTypeOf(result.pending.nodeId).toEqualTypeOf<"a">();
+        expectTypeOf(result.pending.step).toEqualTypeOf<number>();
+      }
+      expectTypeOf(result.state).toEqualTypeOf<State>();
+    };
+    expectTypeOf(check).toBeFunction();
+  });
+
+  it("types interrupt values and effects", () => {
+    createGraph(schema, {
+      start: "a",
+      nodes: {
+        a: CodeNode(
+          (s, ctx) => {
+            const answer = ctx.interrupt<string>({ question: s.question });
+            expectTypeOf(answer).toEqualTypeOf<string>();
+            expectTypeOf(ctx.meta.recovered).toEqualTypeOf<boolean>();
+            return { ...s, answer };
+          },
+          { effect: "write" },
+        ),
+      },
+      endNodes: ["a"],
+    });
+    const invalid = () => {
+      // @ts-expect-error effect is "read" | "write"
+      CodeNode<State>((s) => s, { effect: "delete" });
+    };
+    expectTypeOf(invalid).toBeFunction();
+  });
+
   it("rejects unknown node ids and wrong input at compile time", () => {
     const build = () => {
       createGraph(schema, {

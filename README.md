@@ -18,6 +18,10 @@ npm install taugraph zod     # or any Standard Schema library: valibot, arktype,
 
 In reinforcement learning, τ is the standard symbol for a trajectory: the sequence of states and actions an agent goes through. A taugraph run is exactly that, a path through the graph with a state snapshot at every step, recorded so it can be replayed. The name is also a nod to [Pi](https://pi.dev), whose minimal, append-only design taugraph follows (and to τ = 2π).
 
+## Why put the flow in code
+
+If a model decides every step and gets each one right 95% of the time, a 3-step flow succeeds about 86% of the time and a 5-step flow about 77%. Better prompts move 95% to 97%, never to 100%. taugraph takes everything that can be written down in advance (what runs next, when to stop and ask, which calls change the world) out of the model and into a typed graph. The model is left with what only it can do, such as understanding a reply and picking one of a few allowed commands.
+
 ## Where it sits
 
 |               | Pi                              | LangGraph                                 | taugraph                                      |
@@ -35,7 +39,7 @@ In reinforcement learning, τ is the standard symbol for a trajectory: the seque
 2. State has a schema ([Standard Schema](https://standardschema.dev): Zod ≥ 3.24, Valibot ≥ 1, ArkType ≥ 2).
 3. The trace is append-only. Events are frozen and never edited.
 4. A run is a serializable trace. Replay it at any time, with any node or model swapped.
-5. No hidden magic. Side effects (LLM calls, tool calls) are recorded as explicit events.
+5. No hidden magic. Side effects are recorded as explicit events, and nodes that change the world declare `effect: "write"` so a replay never repeats them.
 6. Sync first, async optional. `runSync` never touches a Promise; no async runtime is assumed.
 7. Zero runtime dependencies. Works in Node ≥ 22, Bun, Deno and browsers.
 
@@ -103,9 +107,10 @@ State must be plain JSON (no `Date`, `Map`, class instances). That is what makes
 type Node<S> = (state: S, ctx: RunContext) => S | Promise<S>;
 
 interface RunContext {
-  meta: { runId: string; nodeId: string; step: number; attempt: number };
+  meta: { runId: string; nodeId: string; step: number; attempt: number; recovered: boolean };
   signal: AbortSignal; // pass it to fetch / model clients
   trace: { append(event: PluginEvent): void }; // record a side effect
+  interrupt<T>(request?: unknown): T; // pause the run until resume(trace, value)
 }
 ```
 
@@ -126,31 +131,55 @@ The graph is checked when it is built: unknown nodes, dead ends, end nodes with 
 An append-only list of frozen events:
 
 ```
-run_start → enter → [llm_call | tool_call | ...] → exit → enter → ... → run_end
+run_start → enter → [llm_call | tool_call | ...] → exit → enter → pause → run_end(paused)
+          → resume → enter → exit → ... → run_end
 ```
 
-`enter` carries the input state, `exit` the output state, so the stream doubles as a sequence of snapshots. Nodes add their own events with `ctx.trace.append`. Kernel event types are reserved. Stream events to a sink as they happen with `run(input, { onEvent })`. Full spec: [docs/trace-format.md](./docs/trace-format.md).
+`enter` carries the input state, `exit` the output state, so the stream doubles as a sequence of snapshots. Nodes add their own events with `ctx.trace.append`. Kernel event types are reserved.
+
+`run(input, { onEvent })` hands every event to your sink before the run continues. If the sink throws, the run stops with `SINK_FAILED`, so no step runs without being logged. Full spec: [docs/trace-format.md](./docs/trace-format.md).
+
+### Pause and resume
+
+A node calls `ctx.interrupt(request)` to wait for something from outside: a human approval, a button click, a webhook. The run returns `{ status: "paused", pending: { nodeId, step, request } }`. Store the trace anywhere, exit the process, and later:
+
+```ts
+const result = await graph.resume(trace, value); // same runId, appended to the same trace
+```
+
+On resume the waiting node runs again from the top and `ctx.interrupt` returns `value`; code before the call runs twice, so keep it free of side effects. The n-th `interrupt` in a node gets the n-th value, and each visit of a looping node gets its own values. **The trace is the checkpoint**: no database or checkpointer is involved. Resume a paused trace once; to reject stale answers (an old button clicked twice), compare `pending.step` with the latest trace you stored.
+
+`resume(trace)` without a value also recovers a trace that ended mid-run, for example after a crash: it continues after the last finished step. If a `write` node was running at that moment, its outcome is unknown, so resume stops with `UNKNOWN_OUTCOME`. Check the outside system, then call `resume(trace, undefined, { allowWrites: true })`; the node sees `ctx.meta.recovered === true`.
+
+### Effects
+
+```ts
+CodeNode(placeOrder, { effect: "write" });
+```
+
+`write` marks a node whose call changes the outside world. It is recorded on `enter` events, and replay refuses to run it live (`WRITE_BLOCKED`) unless you override it with a mock or pass `allowWrites: true`. Undeclared nodes count as `read`.
 
 ### Replay
 
 ```ts
-graph.replay(trace, { overrides?, mode?: "recorded" | "live" })
+graph.replay(trace, { overrides?, mode?: "recorded" | "live", allowWrites? })
 ```
 
-The run restarts from the recorded input. In `recorded` mode (default), a node that is not overridden and sees exactly the recorded input state reuses its recorded output, with no side effects. As soon as the state diverges, nodes run live. `live` re-executes everything. Use `diffTraces(a, b)` to find the first diverging step and the changed state keys.
+The run restarts from the recorded input under a new runId. In `recorded` mode (default), a node that is not overridden and sees exactly the recorded input state reuses its recorded output, with no side effects. As soon as the state diverges, nodes run live. `live` re-executes everything. Values delivered by `resume` are fed back to `ctx.interrupt` whenever a step sees the recorded state, so a human-in-the-loop conversation replays without anyone answering again. `write` nodes are blocked as described above. Use `diffTraces(a, b)` to find the first diverging step and the changed state keys.
 
 Typical uses: swap a model and compare answers, mock a flaky tool, rerun a failed production trace locally after a fix, build regression evals from recorded traces.
 
 ### Errors and retries
 
-Every failure is a `TaugraphError` with a `code` (`INVALID_GRAPH`, `INVALID_STATE`, `INVALID_ROUTE`, `NODE_FAILED`, `MAX_STEPS`, `ABORTED`, `ASYNC_IN_SYNC_RUN`, `INVALID_TRACE`, `INVALID_EVENT`), plus `nodeId`, `step`, schema `issues`, the original `cause`, and the `trace` up to the failure. Nodes can opt into retries: `CodeNode(fn, { retry: { maxAttempts: 3 } })`. Each failed attempt is an `error` event.
+Every failure is a `TaugraphError` with a `code` (`INVALID_GRAPH`, `INVALID_STATE`, `INVALID_ROUTE`, `NODE_FAILED`, `MAX_STEPS`, `ABORTED`, `ASYNC_IN_SYNC_RUN`, `INVALID_TRACE`, `INVALID_EVENT`, `WRITE_BLOCKED`, `UNKNOWN_OUTCOME`, `NOT_RESUMABLE`, `SINK_FAILED`), plus `nodeId`, `step`, schema `issues`, the original `cause`, and the `trace` up to the failure. Nodes can opt into retries: `CodeNode(fn, { retry: { maxAttempts: 3 } })`. Each failed attempt is an `error` event.
 
 ## Plugin nodes (`taugraph/nodes`)
 
-| Node       | What it does                                                                                   |
-| ---------- | ---------------------------------------------------------------------------------------------- |
-| `CodeNode` | Deterministic state transformation.                                                            |
-| `LLMNode`  | Calls an `LLMModel`, records an `llm_call` event, optionally parses JSON output with a schema. |
+| Node        | What it does                                                                                   |
+| ----------- | ---------------------------------------------------------------------------------------------- |
+| `CodeNode`  | Deterministic state transformation.                                                            |
+| `LLMNode`   | Calls an `LLMModel`, records an `llm_call` event, optionally parses JSON output with a schema. |
+| `HumanNode` | Pauses for an answer via `ctx.interrupt`, validates it with a schema, asks again if invalid.   |
 
 `LLMNode` only defines the call contract (`{ id, complete(request, { signal }) }`); bring OpenAI, Ollama or anything else through a small adapter. A 40-line OpenAI-compatible one is in [`examples/adapters`](./examples/adapters/openai-compatible.ts).
 
@@ -175,15 +204,14 @@ export const ToolNode = <S>(tool: Tool, apply: (s: S, out: unknown) => S) =>
   );
 ```
 
-## Not in v0.1, on purpose
+## Not in the kernel, on purpose
 
-Persistence backends, distributed workers, parallel nodes, nested subgraphs, built-in tools, memory, vector stores, visual editors, triggers and schedulers. Some will arrive as separate plugin packages; none will enter the kernel.
+Persistence backends, distributed workers, parallel nodes, nested subgraphs, built-in tools, memory, vector stores, visual editors, event routing, triggers and schedulers. Parallel calls inside one step are fine: use `Promise.all` in a node. Some will arrive as separate plugin packages; none will enter the kernel.
 
 ## Roadmap
 
 - `taugraph/tools`: shell and filesystem tool nodes
 - `taugraph/subagent`: delegate to external agents (ACP, Pi instances)
-- `taugraph/human`: human approval / pause-and-resume
 - `taugraph/compact`: trace and state compaction
 - `taugraph/tui`: terminal trace viewer
 
@@ -193,7 +221,8 @@ Persistence backends, distributed workers, parallel nodes, nested subgraphs, bui
 pnpm install
 pnpm check          # typecheck + lint + test
 pnpm build
-pnpm example:rag    # retrieval -> answer with a retry loop, JSONL trace, replay
+pnpm example:rag       # retrieval -> answer with a retry loop, JSONL trace, replay
+pnpm example:checkout  # human in the loop: pause/resume, LLM picks a command, replay never re-orders
 ```
 
 Set `TAUGRAPH_BASE_URL` and `TAUGRAPH_MODEL` (and `TAUGRAPH_API_KEY` if needed) to run the examples against a real OpenAI-compatible endpoint, e.g. Ollama at `http://localhost:11434/v1`.

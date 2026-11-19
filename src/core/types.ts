@@ -5,10 +5,10 @@ export type MaybePromise<T> = T | PromiseLike<T>;
 // ---------------------------------------------------------------------------
 
 /** Event types written by the kernel. Nodes cannot append these. */
-export type KernelEventType = "run_start" | "enter" | "exit" | "error" | "run_end";
+export type KernelEventType = "run_start" | "enter" | "exit" | "error" | "pause" | "resume" | "run_end";
 
 /** Event types reserved by convention for plugin nodes. */
-export type PluginEventType = "llm_call" | "tool_call" | "human_pause";
+export type PluginEventType = "llm_call" | "tool_call";
 
 export type TraceEventType = KernelEventType | PluginEventType | (string & {});
 
@@ -28,7 +28,7 @@ export interface TraceEvent {
   readonly meta?: Readonly<Record<string, unknown>>;
 }
 
-/** A full run transcript. Serialize it with `toJSONL` and replay it with `graph.replay`. */
+/** A full run transcript. Serialize it with `toJSONL`, replay it with `graph.replay`. */
 export type Trace = readonly TraceEvent[];
 
 /** What a node may append through `ctx.trace.append`. The kernel fills in the rest. */
@@ -43,6 +43,15 @@ export interface PluginEvent {
 // Node
 // ---------------------------------------------------------------------------
 
+/**
+ * What running a node does to the outside world.
+ * - `read`: safe to run again (queries, LLM calls, pure code).
+ * - `write`: changes something outside the run (placing an order, sending a message).
+ *   Replay never re-executes a write node unless you pass `allowWrites: true`.
+ * Undeclared nodes are treated like `read`.
+ */
+export type Effect = "read" | "write";
+
 export interface RunContext {
   readonly meta: {
     readonly runId: string;
@@ -50,6 +59,11 @@ export interface RunContext {
     readonly step: number;
     /** 1-based attempt number when the node has a retry policy. */
     readonly attempt: number;
+    /**
+     * True when this step was already running when the trace ended (e.g. the process crashed)
+     * and `resume` started it again. A write node should check whether its effect already happened.
+     */
+    readonly recovered: boolean;
   };
   /** Aborted when the caller cancels the run. Pass it to fetch / model clients. */
   readonly signal: AbortSignal;
@@ -57,6 +71,14 @@ export interface RunContext {
     /** Append a side-effect record (llm_call, tool_call, ...) to the transcript. */
     append(event: PluginEvent): void;
   };
+  /**
+   * Asks the outside world for a value and pauses the run until `graph.resume(trace, value)`.
+   * On resume the node runs again from the top and this call returns the value.
+   * The n-th call in a node returns the n-th value delivered to this step.
+   * Code before the call runs again on resume, so keep it free of side effects.
+   * `request` (plain JSON) is recorded in the `pause` event and returned as `pending.request`.
+   */
+  interrupt<T = unknown>(request?: unknown): T;
 }
 
 export interface RetryPolicy {
@@ -71,6 +93,7 @@ export interface NodeMeta {
   /** Free-form label recorded in `enter` events, e.g. "code" or "llm". */
   readonly kind?: string;
   readonly retry?: RetryPolicy;
+  readonly effect?: Effect;
 }
 
 /** Any function with the `NodeFn` signature is a node. Plugins attach metadata with `defineNode`. */
@@ -108,7 +131,10 @@ export interface RunOptions {
   readonly signal?: AbortSignal;
   /** Upper bound on node executions, guards against unbounded loops. Defaults to 100. */
   readonly maxSteps?: number;
-  /** Called synchronously for every appended event. Use it to stream the trace to a sink. */
+  /**
+   * Called synchronously for every appended event, before the run continues. Use it to write
+   * the trace to durable storage. If it throws, the run stops with SINK_FAILED.
+   */
   readonly onEvent?: (event: TraceEvent) => void;
 }
 
@@ -121,17 +147,45 @@ export interface ReplayOptions<S, K extends string> extends RunOptions {
    * - `recorded` (default): a non-overridden node reuses its recorded output when it sees
    *   exactly the recorded input state; otherwise it runs live.
    * - `live`: every node runs again.
+   * In both modes, values delivered by `resume` are fed to `ctx.interrupt` again when the
+   * step sees the recorded input state.
    */
   readonly mode?: ReplayMode;
+  /** Let `write` nodes run live. Off by default so a replay never repeats a real side effect. */
+  readonly allowWrites?: boolean;
 }
 
-export interface RunResult<S, K extends string = string> {
+export interface ResumeOptions extends Omit<RunOptions, "runId"> {
+  /** Required to restart a `write` node that was running when the trace ended. */
+  readonly allowWrites?: boolean;
+}
+
+/** Where a paused run is waiting. Compare `step` with your latest trace to reject stale answers. */
+export interface Pending<K extends string = string> {
+  readonly nodeId: K;
+  readonly step: number;
+  readonly request: unknown;
+}
+
+interface RunResultBase<S, K extends string> {
   readonly runId: string;
+  /** Final state, or for a paused run the state the waiting node received. */
   readonly state: S;
   readonly trace: Trace;
-  /** Node ids in execution order. */
+  /** Node ids in execution order, across pauses. */
   readonly path: readonly K[];
 }
+
+export interface CompletedRun<S, K extends string = string> extends RunResultBase<S, K> {
+  readonly status: "completed";
+}
+
+export interface PausedRun<S, K extends string = string> extends RunResultBase<S, K> {
+  readonly status: "paused";
+  readonly pending: Pending<K>;
+}
+
+export type RunResult<S, K extends string = string> = CompletedRun<S, K> | PausedRun<S, K>;
 
 export interface Graph<S, I, K extends string> {
   readonly start: K;
@@ -140,6 +194,13 @@ export interface Graph<S, I, K extends string> {
   run(input: I, options?: RunOptions): Promise<RunResult<S, K>>;
   /** Runs without Promises. Throws ASYNC_IN_SYNC_RUN if a node or the schema returns a Promise. */
   runSync(input: I, options?: RunOptions): RunResult<S, K>;
-  /** Re-runs a recorded trace from its original input. */
+  /**
+   * Continues a trace under the same runId, appending to it.
+   * - Paused trace: `value` is returned by the waiting node's `ctx.interrupt`.
+   * - Trace that ended without `run_end` (crash): restarts from the last unfinished step; omit `value`.
+   */
+  resume(trace: Trace, value?: unknown, options?: ResumeOptions): Promise<RunResult<S, K>>;
+  resumeSync(trace: Trace, value?: unknown, options?: ResumeOptions): RunResult<S, K>;
+  /** Re-runs a recorded trace from its original input under a new runId. */
   replay(trace: Trace, options?: ReplayOptions<S, K>): Promise<RunResult<S, K>>;
 }

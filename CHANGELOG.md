@@ -4,6 +4,24 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.2.0]
+
+### Added
+
+- Pause and resume: `ctx.interrupt(request)` pauses a run; `graph.resume(trace, value)` / `resumeSync` continues it under the same runId, appending to the same trace. Runs now return `status: "completed" | "paused"`, and paused runs carry `pending: { nodeId, step, request }`.
+- Crash recovery: `resume(trace)` continues a trace that ended without `run_end`. An unfinished `write` step fails with `UNKNOWN_OUTCOME` unless `allowWrites: true`; restarted steps see `ctx.meta.recovered`.
+- Effects: nodes can declare `effect: "read" | "write"` (`defineNode`, `CodeNode`). Replay blocks live `write` nodes with `WRITE_BLOCKED` unless overridden or `allowWrites: true`.
+- Replay feeds values delivered by `resume` back to `ctx.interrupt` when a step sees its recorded state, in both modes.
+- `HumanNode` plugin: pause for an answer, validate it with a schema, ask again with the error.
+- Kernel events `pause` and `resume`; `run_end.meta.status` can be `paused`. Error codes `WRITE_BLOCKED`, `UNKNOWN_OUTCOME`, `NOT_RESUMABLE`, `SINK_FAILED`.
+- Example `examples/checkout.ts`: the model only picks one of a fixed set of commands, and code does the rest.
+
+### Changed
+
+- `onEvent` failures stop the run with `SINK_FAILED` instead of being rethrown asynchronously while the run continued.
+- `RunResult` is now a union of `CompletedRun` and `PausedRun`; check `status` before reading `pending`.
+- Removed the conventional `human_pause` plugin event type; pausing is now the kernel's `pause` event.
+
 ## [0.1.0]
 
 ### Added

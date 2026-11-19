@@ -1,6 +1,6 @@
 import { TaugraphError } from "./errors.js";
 import type { KernelEventType, Trace, TraceEvent, TraceEventType } from "./types.js";
-import { jsonEqual } from "./util.js";
+import { freezeJson, jsonEqual } from "./util.js";
 
 export const TRACE_FORMAT = "taugraph.trace";
 export const TRACE_VERSION = 1;
@@ -10,6 +10,8 @@ export const KERNEL_EVENT_TYPES: ReadonlySet<string> = new Set<KernelEventType>(
   "enter",
   "exit",
   "error",
+  "pause",
+  "resume",
   "run_end",
 ]);
 
@@ -25,18 +27,48 @@ export interface EventDraft {
 /**
  * Append-only event log for one run. Payloads must already be frozen JSON
  * (see `freezeJson`); the log only assigns seq / runId / timestamp and freezes the envelope.
+ *
+ * Every event is handed to `onEvent` before `append` returns. If the sink throws, `append`
+ * throws SINK_FAILED and keeps throwing, so the run cannot take another step unlogged.
  */
 export class TraceLog {
-  readonly #events: TraceEvent[] = [];
+  readonly #events: TraceEvent[];
   readonly #runId: string;
   readonly #onEvent: ((event: TraceEvent) => void) | undefined;
+  #sinkError: { readonly cause: unknown } | undefined;
 
-  constructor(runId: string, onEvent?: (event: TraceEvent) => void) {
+  /** `prefix` continues an existing trace (resume); it is not sent to `onEvent` again. */
+  constructor(runId: string, onEvent?: (event: TraceEvent) => void, prefix: Trace = []) {
     this.#runId = runId;
     this.#onEvent = onEvent;
+    this.#events = prefix.map((event) => freezeJson(event));
   }
 
   append(draft: EventDraft): TraceEvent {
+    const event = this.#push(draft);
+    if (this.#sinkError) throw sinkFailed(this.#sinkError.cause);
+    this.#emit(event);
+    return event;
+  }
+
+  /** For the closing `run_end` of a failing run: never throws, skips a sink that already failed. */
+  appendFinal(draft: EventDraft): TraceEvent {
+    const event = this.#push(draft);
+    if (!this.#sinkError) {
+      try {
+        this.#emit(event);
+      } catch {
+        // Already failing; the original error is the one to report.
+      }
+    }
+    return event;
+  }
+
+  snapshot(): Trace {
+    return Object.freeze(this.#events.slice());
+  }
+
+  #push(draft: EventDraft): TraceEvent {
     const event: Record<string, unknown> = {
       seq: this.#events.length,
       runId: this.#runId,
@@ -47,26 +79,26 @@ export class TraceLog {
     if (draft.step !== undefined) event.step = draft.step;
     if (draft.input !== undefined) event.input = draft.input;
     if (draft.output !== undefined) event.output = draft.output;
-    if (draft.meta !== undefined)
-      event.meta = Object.isFrozen(draft.meta) ? draft.meta : Object.freeze({ ...draft.meta });
+    if (draft.meta !== undefined) event.meta = Object.isFrozen(draft.meta) ? draft.meta : freezeJson(draft.meta);
     const frozen = Object.freeze(event) as unknown as TraceEvent;
     this.#events.push(frozen);
-    if (this.#onEvent) {
-      try {
-        this.#onEvent(frozen);
-      } catch (error) {
-        // A broken sink must not corrupt the run; surface the error out of band.
-        queueMicrotask(() => {
-          throw error;
-        });
-      }
-    }
     return frozen;
   }
 
-  snapshot(): Trace {
-    return Object.freeze(this.#events.slice());
+  #emit(event: TraceEvent): void {
+    if (!this.#onEvent) return;
+    try {
+      this.#onEvent(event);
+    } catch (cause) {
+      this.#sinkError = { cause };
+      throw sinkFailed(cause);
+    }
   }
+}
+
+function sinkFailed(cause: unknown): TaugraphError {
+  const reason = cause instanceof Error ? cause.message : String(cause);
+  return new TaugraphError("SINK_FAILED", `onEvent threw: ${reason}`, { cause });
 }
 
 // ---------------------------------------------------------------------------
@@ -153,6 +185,108 @@ export function tracePath(trace: Trace): string[] {
     if (event.type === "enter" && event.step === path.length && event.nodeId !== undefined) path.push(event.nodeId);
   }
   return path;
+}
+
+// ---------------------------------------------------------------------------
+// Pause / resume (internal; used by the engine)
+// ---------------------------------------------------------------------------
+
+/**
+ * Where a trace can continue from.
+ * - `start`: nothing ran yet.
+ * - `after`: `step` finished; route on from its output.
+ * - `paused`: `step` is waiting for a value.
+ * - `resumed`: a value was delivered to `step` but the node had not started again.
+ * - `running`: `step` was executing when the trace ended; its outcome is unknown.
+ */
+export type ResumePoint =
+  | { readonly kind: "start" }
+  | {
+      readonly kind: "after" | "paused" | "resumed" | "running";
+      readonly step: number;
+      readonly nodeId: string;
+      /** Output of the step for `after`, otherwise the state the step received. */
+      readonly state: unknown;
+    };
+
+export function resumePoint(trace: Trace): ResumePoint {
+  const last = trace[trace.length - 1] as TraceEvent;
+  const status = last.type === "run_end" ? last.meta?.status : undefined;
+  if (last.type === "run_end" && status !== "paused") {
+    throw new TaugraphError(
+      "NOT_RESUMABLE",
+      `Run is ${String(status)}; only paused or interrupted runs can be resumed. Use graph.replay to run it again.`,
+    );
+  }
+
+  // The step to continue is the one of the last step event that is not a delivered value.
+  let target: number | undefined;
+  for (let i = trace.length - 1; i >= 0 && target === undefined; i--) {
+    const event = trace[i] as TraceEvent;
+    if (event.step !== undefined && event.type !== "resume") target = event.step;
+  }
+  if (target === undefined) return { kind: "start" };
+
+  let enter: TraceEvent | undefined;
+  let output: unknown;
+  let phase: "after" | "paused" | "resumed" | "running" = "running";
+  for (const event of trace) {
+    if (event.step !== target) continue;
+    if (event.type === "enter") {
+      enter ??= event;
+      phase = "running";
+    } else if (event.type === "exit") {
+      phase = "after";
+      output = event.output;
+    } else if (event.type === "pause") {
+      phase = "paused";
+    } else if (event.type === "resume") {
+      phase = "resumed";
+    } else if (event.type === "error") {
+      phase = "running";
+    }
+  }
+  if (!enter || enter.nodeId === undefined) {
+    throw new TaugraphError("INVALID_TRACE", `Step ${target} has events but no enter event`);
+  }
+  if (status === "paused" && phase !== "paused") {
+    throw new TaugraphError("INVALID_TRACE", `run_end says the run is paused, but step ${target} is not`);
+  }
+  return { kind: phase, step: target, nodeId: enter.nodeId, state: phase === "after" ? output : enter.input };
+}
+
+/** Values delivered to `ctx.interrupt` at `step`, in order. */
+export function deliveredValues(trace: Trace, step: number): unknown[] {
+  return trace
+    .filter((event) => event.type === "resume" && event.step === step && event.meta?.reason !== "recovered")
+    .map((event) => event.input);
+}
+
+export interface RecordedAnswers {
+  readonly nodeId: string;
+  /** State the step received. Answers are only reused when a replay sees the same state. */
+  readonly input: unknown;
+  readonly values: readonly unknown[];
+}
+
+/** Values delivered by `resume`, keyed by step, for replays to feed back to `ctx.interrupt`. */
+export function recordedAnswers(trace: Trace): Map<number, RecordedAnswers> {
+  const enters = new Map<number, TraceEvent>();
+  const values = new Map<number, unknown[]>();
+  for (const event of trace) {
+    if (event.step === undefined) continue;
+    if (event.type === "enter" && !enters.has(event.step)) enters.set(event.step, event);
+    if (event.type === "resume" && event.meta?.reason !== "recovered") {
+      const value = event.input === undefined ? undefined : freezeJson(event.input);
+      values.set(event.step, [...(values.get(event.step) ?? []), value]);
+    }
+  }
+  const answers = new Map<number, RecordedAnswers>();
+  for (const [step, list] of values) {
+    const enter = enters.get(step);
+    if (enter?.nodeId !== undefined) answers.set(step, { nodeId: enter.nodeId, input: enter.input, values: list });
+  }
+  return answers;
 }
 
 export interface TraceDiff {

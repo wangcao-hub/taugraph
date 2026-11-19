@@ -8,8 +8,18 @@
  */
 import { formatIssues, TaugraphError } from "./errors.js";
 import type { StandardSchemaV1 } from "./standard-schema.js";
-import { KERNEL_EVENT_TYPES, type RecordedStep, TRACE_FORMAT, TRACE_VERSION, TraceLog } from "./trace.js";
-import type { Node, PluginEvent, ReplayMode, RunContext, RunOptions, RunResult } from "./types.js";
+import {
+  deliveredValues,
+  KERNEL_EVENT_TYPES,
+  type RecordedAnswers,
+  type RecordedStep,
+  type ResumePoint,
+  TRACE_FORMAT,
+  TRACE_VERSION,
+  TraceLog,
+  tracePath,
+} from "./trace.js";
+import type { Node, PluginEvent, ReplayMode, RunContext, RunOptions, RunResult, Trace } from "./types.js";
 import { freezeJson, isThenable, jsonEqual, NotJsonError, randomId } from "./util.js";
 
 export const DEFAULT_MAX_STEPS = 100;
@@ -31,70 +41,113 @@ export interface ReplayPlan<S> {
   readonly mode: ReplayMode;
   readonly overrides: Readonly<Record<string, Node<S> | undefined>>;
   readonly recorded: ReadonlyMap<number, RecordedStep>;
+  readonly answers: ReadonlyMap<number, RecordedAnswers>;
+  readonly allowWrites: boolean;
+}
+
+/** Checked by `graph.resume` before anything is appended. */
+export interface ResumePlan {
+  readonly trace: Trace;
+  readonly point: ResumePoint;
+  /** Frozen JSON value for a paused step, otherwise undefined. */
+  readonly value: unknown;
 }
 
 export interface ExecuteParams<S> {
   readonly graph: CompiledGraph<S>;
-  readonly input: unknown;
   readonly options: RunOptions;
+  /** Raw run input. Ignored when resuming. */
+  readonly input?: unknown;
   readonly replay?: ReplayPlan<S>;
+  readonly resume?: ResumePlan;
 }
 
 type Effects<T> = Generator<unknown, T, unknown>;
 
-const NON_RETRYABLE = new Set(["ABORTED", "ASYNC_IN_SYNC_RUN", "INVALID_EVENT"]);
+/** Where the step loop starts: a node to run, or an already finished run to close. */
+type Start<S> =
+  | {
+      readonly nodeId: string;
+      readonly step: number;
+      readonly state: S;
+      readonly values: readonly unknown[];
+      readonly recovered: boolean;
+    }
+  | { readonly done: S };
+
+type StepOutcome<S> =
+  | { readonly kind: "exit"; readonly state: S }
+  | { readonly kind: "pause"; readonly request: unknown };
+
+const NON_RETRYABLE = new Set(["ABORTED", "ASYNC_IN_SYNC_RUN", "INVALID_EVENT", "SINK_FAILED"]);
 const NEVER_ABORTED = new AbortController().signal;
 
+/** Thrown by `ctx.interrupt` to unwind the node. Detection does not rely on it propagating. */
+class PauseSignal extends Error {
+  override readonly name = "TaugraphPause";
+  constructor() {
+    super("Run paused by ctx.interrupt(). Do not catch this; it is how the node waits for input.");
+  }
+}
+
 export function* execute<S>(params: ExecuteParams<S>): Effects<RunResult<S>> {
-  const { graph, options, replay } = params;
-  const runId = options.runId ?? randomId();
+  const { graph, options, replay, resume } = params;
   const signal = options.signal ?? NEVER_ABORTED;
   const maxSteps = options.maxSteps ?? DEFAULT_MAX_STEPS;
-  const log = new TraceLog(runId, options.onEvent);
-  const path: string[] = [];
+  const runId = resume ? (resume.trace[0] as Trace[number]).runId : (options.runId ?? randomId());
+  const log = new TraceLog(runId, options.onEvent, resume?.trace);
 
   try {
-    const input = toJson(params.input, "INVALID_STATE", "Run input is not plain JSON");
-    log.append({
-      type: "run_start",
-      input,
-      meta: {
-        format: TRACE_FORMAT,
-        version: TRACE_VERSION,
-        start: graph.start,
-        ...(replay && { replayOf: replay.sourceRunId, replayMode: replay.mode }),
-      },
-    });
-
-    let state: S = yield* validate(graph.schema, input, "Run input failed schema validation");
-    let current = graph.start;
-
-    for (let step = 0; ; step++) {
-      throwIfAborted(signal);
-      if (step >= maxSteps) {
-        throw new TaugraphError(
-          "MAX_STEPS",
-          `Run exceeded maxSteps (${maxSteps}). The graph may loop forever; add an exit condition or raise maxSteps.`,
-        );
+    const start = resume ? yield* beginResume(graph, log, resume) : yield* beginRun(graph, log, params.input, replay);
+    let state: S;
+    if ("done" in start) {
+      state = start.done;
+    } else {
+      state = start.state;
+      let current = start.nodeId;
+      let carry: Pick<StepParams<S>, "values" | "recovered"> = { values: start.values, recovered: start.recovered };
+      for (let step = start.step; ; step++) {
+        throwIfAborted(signal);
+        if (step >= maxSteps) {
+          throw new TaugraphError(
+            "MAX_STEPS",
+            `Run exceeded maxSteps (${maxSteps}). The graph may loop forever; add an exit condition or raise maxSteps.`,
+          );
+        }
+        const outcome = yield* runStep({ graph, log, runId, signal, replay, nodeId: current, step, state, ...carry });
+        carry = { values: undefined, recovered: false };
+        if (outcome.kind === "pause") {
+          log.append({
+            type: "run_end",
+            meta: { status: "paused", steps: tracePath(log.snapshot()).length, pending: { nodeId: current, step } },
+          });
+          const trace = log.snapshot();
+          const pending = { nodeId: current, step, request: outcome.request };
+          return { status: "paused", runId, state, trace, path: tracePath(trace), pending };
+        }
+        state = outcome.state;
+        if (graph.endNodes.has(current)) break;
+        current = nextNode(graph, current, state);
       }
-      path.push(current);
-      state = yield* runStep({ graph, log, runId, signal, replay, nodeId: current, step, state });
-      if (graph.endNodes.has(current)) break;
-      current = nextNode(graph, current, state);
     }
 
-    log.append({ type: "run_end", output: state, meta: { status: "completed", steps: path.length } });
-    return { runId, state, trace: log.snapshot(), path };
+    log.append({
+      type: "run_end",
+      output: state,
+      meta: { status: "completed", steps: tracePath(log.snapshot()).length },
+    });
+    const trace = log.snapshot();
+    return { status: "completed", runId, state, trace, path: tracePath(trace) };
   } catch (thrown) {
     const error =
       thrown instanceof TaugraphError
         ? thrown
         : new TaugraphError("NODE_FAILED", errorMessage(thrown), { cause: thrown });
-    log.append({
+    log.appendFinal({
       type: "run_end",
       meta: {
         status: "failed",
-        steps: path.length,
+        steps: tracePath(log.snapshot()).length,
         error: {
           code: error.code,
           message: error.message,
@@ -107,6 +160,68 @@ export function* execute<S>(params: ExecuteParams<S>): Effects<RunResult<S>> {
   }
 }
 
+function* beginRun<S>(
+  graph: CompiledGraph<S>,
+  log: TraceLog,
+  rawInput: unknown,
+  replay: ReplayPlan<S> | undefined,
+): Effects<Start<S>> {
+  const input = toJson(rawInput, "Run input is not plain JSON");
+  log.append({
+    type: "run_start",
+    input,
+    meta: {
+      format: TRACE_FORMAT,
+      version: TRACE_VERSION,
+      start: graph.start,
+      ...(replay && { replayOf: replay.sourceRunId, replayMode: replay.mode }),
+    },
+  });
+  const state = yield* validate(graph.schema, input, "Run input failed schema validation");
+  return { nodeId: graph.start, step: 0, state, values: [], recovered: false };
+}
+
+function* beginResume<S>(graph: CompiledGraph<S>, log: TraceLog, plan: ResumePlan): Effects<Start<S>> {
+  const { point } = plan;
+  if (point.kind === "start" || point.kind === "after") {
+    log.append({ type: "resume", meta: { reason: "recovered" } });
+    if (point.kind === "start") {
+      const input = (plan.trace[0] as Trace[number]).input;
+      const state = yield* validate(graph.schema, input, "Run input failed schema validation");
+      return { nodeId: graph.start, step: 0, state, values: [], recovered: false };
+    }
+    const message = `State recorded after step ${point.step} no longer matches the schema`;
+    const state = yield* validate(graph.schema, point.state, message, point.nodeId, point.step);
+    if (graph.endNodes.has(point.nodeId)) return { done: state };
+    const step = point.step + 1;
+    return {
+      nodeId: nextNode(graph, point.nodeId, state),
+      step,
+      state,
+      values: deliveredValues(plan.trace, step),
+      recovered: false,
+    };
+  }
+
+  const delivered = point.kind === "paused";
+  log.append({
+    type: "resume",
+    nodeId: point.nodeId,
+    step: point.step,
+    ...(delivered && plan.value !== undefined && { input: plan.value }),
+    meta: { reason: delivered ? "paused" : "recovered" },
+  });
+  const message = `State recorded for step ${point.step} no longer matches the schema`;
+  const state = yield* validate(graph.schema, point.state, message, point.nodeId, point.step);
+  return {
+    nodeId: point.nodeId,
+    step: point.step,
+    state,
+    values: deliveredValues(log.snapshot(), point.step),
+    recovered: point.kind === "running",
+  };
+}
+
 interface StepParams<S> {
   readonly graph: CompiledGraph<S>;
   readonly log: TraceLog;
@@ -116,58 +231,79 @@ interface StepParams<S> {
   readonly nodeId: string;
   readonly step: number;
   readonly state: S;
+  /** Values for `ctx.interrupt`, set when resuming this step. */
+  readonly values: readonly unknown[] | undefined;
+  readonly recovered: boolean;
 }
 
-function* runStep<S>(p: StepParams<S>): Effects<S> {
-  const { graph, log, nodeId, step, state } = p;
-  const override = p.replay?.overrides[nodeId];
-  const recorded = override ? undefined : p.replay?.recorded.get(step);
+function* runStep<S>(p: StepParams<S>): Effects<StepOutcome<S>> {
+  const { graph, log, nodeId, step, state, replay } = p;
+  const override = replay?.overrides[nodeId];
+  const recorded = override ? undefined : replay?.recorded.get(step);
 
   if (recorded && recorded.nodeId === nodeId && jsonEqual(recorded.input, state)) {
-    const meta = { attempt: 1, source: "recorded", recordedFrom: { runId: p.replay?.sourceRunId, seq: recorded.seq } };
+    const meta = { attempt: 1, source: "recorded", recordedFrom: { runId: replay?.sourceRunId, seq: recorded.seq } };
     log.append({ type: "enter", nodeId, step, input: state, meta });
-    const output = toJson(
-      recorded.output,
-      "INVALID_STATE",
-      `Recorded output of node "${nodeId}" is not plain JSON`,
-      nodeId,
-      step,
-    );
-    const next = yield* validate(
-      graph.schema,
-      output,
-      `Recorded output of node "${nodeId}" (step ${step}) no longer matches the schema`,
-      nodeId,
-      step,
-    );
+    const output = toJson(recorded.output, `Recorded output of node "${nodeId}" is not plain JSON`, nodeId, step);
+    const message = `Recorded output of node "${nodeId}" (step ${step}) no longer matches the schema`;
+    const next = yield* validate(graph.schema, output, message, nodeId, step);
     log.append({ type: "exit", nodeId, step, output: next, meta: { ...meta, durationMs: 0 } });
-    return next;
+    return { kind: "exit", state: next };
   }
 
   const node = override ?? (graph.nodes[nodeId] as Node<S>);
   const source = override ? "override" : "live";
-  const maxAttempts = node.retry?.maxAttempts ?? 1;
+  if (replay && node.effect === "write" && !replay.allowWrites) {
+    throw new TaugraphError(
+      "WRITE_BLOCKED",
+      `Replay reached write node "${nodeId}" (step ${step}), which would run live. Override it with a mock, or pass allowWrites: true to really run it.`,
+      { nodeId, step },
+    );
+  }
 
+  let values = p.values;
+  if (values === undefined) {
+    const answers = replay?.answers.get(step);
+    values = answers && answers.nodeId === nodeId && jsonEqual(answers.input, state) ? answers.values : [];
+    for (const value of values) {
+      const from = { runId: replay?.sourceRunId };
+      log.append({ type: "resume", nodeId, step, input: value, meta: { reason: "replayed", recordedFrom: from } });
+    }
+  }
+
+  const maxAttempts = node.retry?.maxAttempts ?? 1;
   for (let attempt = 1; ; attempt++) {
     throwIfAborted(p.signal);
-    const meta = { attempt, source, ...(node.kind !== undefined && { kind: node.kind }) };
+    const meta = {
+      attempt,
+      source,
+      ...(node.kind !== undefined && { kind: node.kind }),
+      ...(node.effect !== undefined && { effect: node.effect }),
+      ...(p.recovered && { recovered: true }),
+    };
     log.append({ type: "enter", nodeId, step, input: state, meta });
     const startedAt = Date.now();
-    const { ctx, close } = createContext(log, p.runId, nodeId, step, attempt, p.signal);
+    const control = createContext({ ...p, attempt, values });
     try {
       let output: unknown;
+      let failure: { readonly error: unknown } | undefined;
       try {
-        output = yield node(state, ctx);
+        output = yield node(state, control.ctx);
+      } catch (error) {
+        failure = { error };
       } finally {
-        close();
+        control.close();
       }
-      const json = toJson(
-        output,
-        "INVALID_STATE",
-        `Node "${nodeId}" (step ${step}) returned a state that is not plain JSON`,
-        nodeId,
-        step,
-      );
+      // A requested pause wins, even if the node caught the signal or threw something else.
+      if (control.pending) {
+        const { request } = control.pending;
+        const durationMs = Date.now() - startedAt;
+        log.append({ type: "pause", nodeId, step, output: request, meta: { ...meta, durationMs } });
+        return { kind: "pause", request };
+      }
+      if (failure) throw failure.error;
+      const message = `Node "${nodeId}" (step ${step}) returned a state that is not plain JSON`;
+      const json = toJson(output, message, nodeId, step);
       const next = yield* validate(
         graph.schema,
         json,
@@ -176,7 +312,7 @@ function* runStep<S>(p: StepParams<S>): Effects<S> {
         step,
       );
       log.append({ type: "exit", nodeId, step, output: next, meta: { ...meta, durationMs: Date.now() - startedAt } });
-      return next;
+      return { kind: "exit", state: next };
     } catch (thrown) {
       const error = asNodeError(thrown, nodeId, step);
       const willRetry = attempt < maxAttempts && !NON_RETRYABLE.has(error.code);
@@ -191,21 +327,35 @@ function* runStep<S>(p: StepParams<S>): Effects<S> {
   }
 }
 
-function createContext(
-  log: TraceLog,
-  runId: string,
-  nodeId: string,
-  step: number,
-  attempt: number,
-  signal: AbortSignal,
-): { ctx: RunContext; close: () => void } {
+interface ContextParams {
+  readonly log: TraceLog;
+  readonly runId: string;
+  readonly nodeId: string;
+  readonly step: number;
+  readonly attempt: number;
+  readonly recovered: boolean;
+  readonly signal: AbortSignal;
+  readonly values: readonly unknown[];
+}
+
+interface Control {
+  readonly ctx: RunContext;
+  readonly pending: { readonly request: unknown } | undefined;
+  close(): void;
+}
+
+function createContext(p: ContextParams): Control {
+  const { log, nodeId, step } = p;
   let open = true;
+  let used = 0;
+  let pending: { readonly request: unknown } | undefined;
   const fail = (message: string, cause?: unknown): never => {
     throw new TaugraphError("INVALID_EVENT", message, { nodeId, step, cause });
   };
+
   const ctx: RunContext = Object.freeze({
-    meta: Object.freeze({ runId, nodeId, step, attempt }),
-    signal,
+    meta: Object.freeze({ runId: p.runId, nodeId, step, attempt: p.attempt, recovered: p.recovered }),
+    signal: p.signal,
     trace: Object.freeze({
       append(event: PluginEvent) {
         if (!open) fail(`Node "${nodeId}" appended "${event.type}" after its step finished`);
@@ -220,8 +370,30 @@ function createContext(
         log.append({ type: event.type, nodeId, step, ...payload });
       },
     }),
+    interrupt<T>(request?: unknown): T {
+      if (!open) fail(`Node "${nodeId}" called interrupt() after its step finished`);
+      if (pending) throw new PauseSignal();
+      if (used < p.values.length) return p.values[used++] as T;
+      let frozen: unknown;
+      try {
+        frozen = request === undefined ? undefined : freezeJson(request);
+      } catch (cause) {
+        fail(`interrupt() request from node "${nodeId}" is not plain JSON: ${errorMessage(cause)}`, cause);
+      }
+      pending = { request: frozen };
+      throw new PauseSignal();
+    },
   });
-  return { ctx, close: () => (open = false) };
+
+  return {
+    ctx,
+    get pending() {
+      return pending;
+    },
+    close: () => {
+      open = false;
+    },
+  };
 }
 
 function nextNode<S>(graph: CompiledGraph<S>, from: string, state: S): string {
@@ -271,15 +443,15 @@ function* validate<S>(
       issues: result.issues,
     });
   }
-  return toJson(result.value, "INVALID_STATE", `${message}: validated state is not plain JSON`, nodeId, step);
+  return toJson(result.value, `${message}: validated state is not plain JSON`, nodeId, step);
 }
 
-function toJson<T>(value: T, code: "INVALID_STATE", message: string, nodeId?: string, step?: number): T {
+export function toJson<T>(value: T, message: string, nodeId?: string, step?: number): T {
   try {
     return freezeJson(value);
   } catch (cause) {
     if (!(cause instanceof NotJsonError)) throw cause;
-    throw new TaugraphError(code, `${message} (${cause.message})`, { nodeId, step, cause });
+    throw new TaugraphError("INVALID_STATE", `${message} (${cause.message})`, { nodeId, step, cause });
   }
 }
 

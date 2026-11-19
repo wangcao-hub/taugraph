@@ -18,8 +18,16 @@ export type TaugraphErrorCode =
   | "ASYNC_IN_SYNC_RUN"
   /** A trace could not be parsed or is not a taugraph trace. */
   | "INVALID_TRACE"
-  /** A node appended an invalid event (reserved type, not JSON, after its step ended). */
-  | "INVALID_EVENT";
+  /** A node appended an invalid event or interrupt request (reserved type, not JSON, after its step ended). */
+  | "INVALID_EVENT"
+  /** A replay reached a `write` node that would run live. Pass `allowWrites: true` or override it. */
+  | "WRITE_BLOCKED"
+  /** `resume` found a `write` node that was running when the trace ended; it may or may not have taken effect. */
+  | "UNKNOWN_OUTCOME"
+  /** `resume` got a trace that is completed, failed, or not paused but a value was passed. */
+  | "NOT_RESUMABLE"
+  /** `onEvent` threw. The run stopped so that no step runs without being logged. */
+  | "SINK_FAILED";
 
 export interface TaugraphErrorDetails {
   readonly nodeId?: string | undefined;
@@ -34,7 +42,7 @@ export class TaugraphError extends Error {
   readonly nodeId: string | undefined;
   readonly step: number | undefined;
   readonly issues: readonly StandardSchemaV1.Issue[] | undefined;
-  /** The transcript up to the failure. Set when a run fails. */
+  /** The transcript up to the failure. Set when a run fails after it started appending events. */
   trace: Trace | undefined;
 
   constructor(code: TaugraphErrorCode, message: string, details: TaugraphErrorDetails = {}) {

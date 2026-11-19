@@ -1,6 +1,6 @@
 # Trace format, version 1
 
-A trace is the complete, append-only record of one run. It is an array of events in memory and JSON Lines on disk (`toJSONL` / `fromJSONL`): one event per line, in `seq` order.
+A trace is the complete, append-only record of one run. It is an array of events in memory and JSON Lines on disk (`toJSONL` / `fromJSONL`): one event per line, in `seq` order. A paused run and its resumptions share one runId and one trace.
 
 ## Event
 
@@ -24,23 +24,24 @@ All payloads are plain JSON. In memory every event and payload is frozen.
 
 Only the kernel writes these. `ctx.trace.append` rejects them.
 
-| type        | fields                                                                                                                                                                                        |
-| ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `run_start` | `input`: raw run input. `meta`: `format: "taugraph.trace"`, `version: 1`, `start`, and for replays `replayOf` (source runId) and `replayMode`.                                                |
-| `enter`     | `nodeId`, `step`, `input`: state the node receives. `meta`: `attempt`, `source` (`live` \| `override` \| `recorded`), `kind`, and `recordedFrom: { runId, seq }` when `source` is `recorded`. |
-| `exit`      | `nodeId`, `step`, `output`: validated new state. `meta`: same as `enter` plus `durationMs`.                                                                                                   |
-| `error`     | `nodeId`, `step`. `meta`: `attempt`, `source`, `code`, `message`, `willRetry`.                                                                                                                |
-| `run_end`   | `output`: final state (completed runs only). `meta`: `status` (`completed` \| `failed`), `steps`, `error: { code, message, nodeId? }` on failure.                                             |
+| type        | fields                                                                                                                                                                                                                                                                                               |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `run_start` | `input`: raw run input. `meta`: `format: "taugraph.trace"`, `version: 1`, `start`, and for replays `replayOf` (source runId) and `replayMode`.                                                                                                                                                       |
+| `enter`     | `nodeId`, `step`, `input`: state the node receives. `meta`: `attempt`, `source` (`live` \| `override` \| `recorded`), `kind`, `effect`, `recovered: true` when restarted after a crash, and `recordedFrom: { runId, seq }` when `source` is `recorded`.                                              |
+| `exit`      | `nodeId`, `step`, `output`: validated new state. `meta`: same as `enter` plus `durationMs`.                                                                                                                                                                                                          |
+| `error`     | `nodeId`, `step`. `meta`: `attempt`, `source`, `code`, `message`, `willRetry`.                                                                                                                                                                                                                       |
+| `pause`     | `nodeId`, `step`, `output`: the `ctx.interrupt` request. `meta`: same as `enter` plus `durationMs`.                                                                                                                                                                                                  |
+| `resume`    | Starts a new segment. `meta.reason`: `paused` (`nodeId`, `step`, `input`: the delivered value), `recovered` (continuing an interrupted trace; `nodeId` and `step` only when restarting an unfinished step), or `replayed` (a recorded value fed back during replay, with `recordedFrom: { runId }`). |
+| `run_end`   | `output`: final state (completed runs only). `meta`: `status` (`completed` \| `paused` \| `failed`), `steps`, `pending: { nodeId, step }` when paused, `error: { code, message, nodeId? }` on failure.                                                                                               |
 
 ## Plugin events
 
 Written by nodes through `ctx.trace.append({ type, input?, output?, meta? })`. The kernel adds `seq`, `runId`, `timestamp`, `nodeId` and `step`, and copies the payload so later mutation cannot change history. Conventional types:
 
-| type          | written by  | input          | output        | meta                  |
-| ------------- | ----------- | -------------- | ------------- | --------------------- |
-| `llm_call`    | `LLMNode`   | `LLMRequest`   | `LLMResponse` | `model`, `durationMs` |
-| `tool_call`   | tool nodes  | tool arguments | tool result   | free-form             |
-| `human_pause` | human nodes | prompt         | human reply   | free-form             |
+| type        | written by | input          | output        | meta                  |
+| ----------- | ---------- | -------------- | ------------- | --------------------- |
+| `llm_call`  | `LLMNode`  | `LLMRequest`   | `LLMResponse` | `model`, `durationMs` |
+| `tool_call` | tool nodes | tool arguments | tool result   | free-form             |
 
 Any other non-empty string is allowed for custom plugins. Prefix it (`myplugin.event`) to avoid collisions.
 
@@ -50,19 +51,33 @@ Any other non-empty string is allowed for custom plugins. Prefix it (`myplugin.e
 run_start
   enter(step 0) [plugin events...] exit(step 0)
   enter(step 1) error(step 1, willRetry) enter(step 1, attempt 2) exit(step 1)
+  enter(step 2) pause(step 2)
+run_end(paused)
+resume(step 2, reason paused)
+  enter(step 2) exit(step 2)
   ...
-run_end
+run_end(completed)
 ```
 
-- Each `step` has one or more `enter` events (one per attempt). Each attempt ends with exactly one `exit` or `error`.
-- Plugin events of a step appear between its `enter` and its `exit` / `error`.
-- Failures outside a step (invalid input, routing errors, `maxSteps`) appear only in `run_end.meta.error`.
+- Each attempt starts with `enter` and ends with exactly one `exit`, `error` or `pause`.
+- Plugin events of a step appear between its `enter` and the end of the attempt.
+- Every `run_end(paused)` is followed, if the run continues, by a `resume`. A trace that ends without `run_end` was interrupted (for example by a crash) and can be continued with `resume`.
+- The values delivered to step _n_ are the `input` of its `resume` events whose reason is not `recovered`, in order. The k-th `ctx.interrupt` call of the step returns the k-th value.
+- Failures outside a step (invalid input, routing errors, `maxSteps`, `WRITE_BLOCKED`) appear only in `run_end.meta.error`.
 - The execution path is the `nodeId` of the first `enter` of each step (`tracePath`).
+
+## Resume contract
+
+`graph.resume(trace, value?)` appends to the trace under the same runId. Nothing is appended if the resume is rejected (`NOT_RESUMABLE`, `UNKNOWN_OUTCOME`, `INVALID_STATE` for a non-JSON value).
+
+- Ends with `run_end(paused)`: `value` is delivered to the pending step, which runs again from the top.
+- Ends without `run_end`: continues from the last step event. A finished step routes on; an unfinished step runs again with `ctx.meta.recovered === true`, except that an unfinished `write` step needs `allowWrites: true`. Passing a value here is rejected.
+- Ends with `run_end(completed | failed)`: rejected. Use `replay` to run it again.
 
 ## Replay contract
 
-`graph.replay(trace)` starts a new run (new `runId`) from `run_start.input`. In `recorded` mode, the recorded output of step _n_ is reused when the node at step _n_ is not overridden, has the same id, and receives a state deep-equal to the recorded `enter.input`. Reused outputs are validated against the current schema again, so schema drift is caught.
+`graph.replay(trace)` starts a new run (new `runId`) from `run_start.input`. In `recorded` mode, the recorded output of step _n_ is reused when the node at step _n_ is not overridden, has the same id, and receives a state deep-equal to the recorded `enter.input`. Reused outputs are validated against the current schema again, so schema drift is caught. In both modes, a live step that receives its recorded input state gets the recorded `resume` values again. A `write` node that would run live fails with `WRITE_BLOCKED` unless `allowWrites` is set; overriding it with a node that is not `write` avoids this.
 
 ## Versioning
 
-`meta.version` on `run_start` is bumped on any breaking change to this format. `fromJSONL` and `replay` reject versions they do not understand.
+`meta.version` on `run_start` is bumped on any breaking change to this format. `fromJSONL` and `replay` reject versions they do not understand. Additive changes, such as new event types or new `meta` fields, do not bump the version; consumers should ignore what they do not know.

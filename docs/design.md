@@ -41,6 +41,22 @@ One outgoing edge per node keeps the state model trivial: there is never more th
 
 Re-running every node on replay would call real models and tools again, which costs money and is not deterministic. In `recorded` mode a node's recorded output is reused only while the node sees exactly the recorded input, so the first changed state makes everything downstream run live. This is what makes "swap one node and compare" cheap and trustworthy.
 
+## Replay never repeats a write
+
+Recorded mode alone is not enough: once the state diverges, downstream nodes run live, and if one of them places an order, every replay places another. Nodes therefore declare `effect: "write"`, and a replay refuses to run such a node live unless it is overridden or the caller passes `allowWrites: true`. There are two levels because the kernel only needs to know one thing: is it safe to run this again? Finer business distinctions (reversible or not, needs confirmation or not) belong in the graph.
+
+## The trace is the checkpoint
+
+Pausing for a human usually means a checkpointer: a storage backend that snapshots state so the run can continue later. taugraph already records the state at every step, so `resume(trace, value)` rebuilds the position from the trace and continues it under the same runId. No storage interface enters the kernel; users keep the trace wherever they like.
+
+`ctx.interrupt` re-runs the node on resume instead of continuing it from the middle, because a JavaScript function cannot be suspended across processes. Values are matched by call order within the step, which lets a node ask several questions and lets a validating `HumanNode` ask again. The kernel detects a pause through a flag rather than by the thrown signal reaching it, so a careless `try/catch` in a node cannot turn a pause into a normal return.
+
+The same function recovers a trace that ended mid-run, for example after a crash. A step that was running is started again, except a `write` step: its effect may already have happened, so the kernel stops with `UNKNOWN_OUTCOME` and leaves the check to the caller. Failed and completed traces are not resumable; `replay` covers rerunning them.
+
+## The log is written ahead
+
+`onEvent` is called before the run continues, and a sink failure stops the run with `SINK_FAILED`. Otherwise a step could run, perhaps a write, after the event that announced it was lost, and the stored trace could no longer be resumed correctly. The sink is synchronous to keep `runSync` possible; buffer in the sink if your storage is asynchronous and you accept the weaker guarantee.
+
 ## `LLMNode` takes a model contract, not a callback
 
 `LLMNode(async (s) => await client.chat(...))` would hide the call from the trace. `LLMNode({ model, prompt, update })` lets the node record the exact request and response as an `llm_call` event, and lets replay swap `model` without touching prompt logic. The node stays synchronous when the model is, so mock models work in `runSync`.

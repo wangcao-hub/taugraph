@@ -1,4 +1,5 @@
 import { defineNode, type MaybePromise, type Node, type RetryPolicy, type StandardSchemaV1 } from "../index.js";
+import { andThen, issuesMessage } from "./util.js";
 
 // ---------------------------------------------------------------------------
 // Model contract. taugraph ships no provider; adapt any SDK or HTTP API to this.
@@ -83,7 +84,7 @@ export function LLMNode<S, T>(config: LLMTextNodeConfig<S> | LLMStructuredNodeCo
       const request: LLMRequest = typeof built === "string" ? { messages: [{ role: "user", content: built }] } : built;
       const startedAt = Date.now();
 
-      return then(model.complete(request, { signal: ctx.signal }), (response) => {
+      return andThen(model.complete(request, { signal: ctx.signal }), (response) => {
         if (typeof response?.content !== "string") {
           throw new TypeError(`Model "${model.id}" returned a response without a string \`content\``);
         }
@@ -94,7 +95,9 @@ export function LLMNode<S, T>(config: LLMTextNodeConfig<S> | LLMStructuredNodeCo
           meta: { model: model.id, durationMs: Date.now() - startedAt },
         });
         if (!("output" in config)) return config.update(state, response.content, response);
-        return then(parseStructured(config.output, response.content), (data) => config.update(state, data, response));
+        return andThen(parseStructured(config.output, response.content), (data) =>
+          config.update(state, data, response),
+        );
       });
     },
     { kind: "llm", ...(config.retry && { retry: config.retry }) },
@@ -110,18 +113,11 @@ function parseStructured<T>(schema: StandardSchemaV1<unknown, T>, content: strin
   } catch {
     throw new LLMOutputError("Model output is not valid JSON", content);
   }
-  return then(schema["~standard"].validate(json), (result) => {
+  return andThen(schema["~standard"].validate(json), (result) => {
     if (result.issues) {
-      const detail = result.issues.map((issue) => issue.message).join("; ");
+      const detail = issuesMessage(result.issues);
       throw new LLMOutputError(`Model output does not match the schema: ${detail}`, content, result.issues);
     }
     return result.value;
   });
-}
-
-function then<A, B>(value: MaybePromise<A>, fn: (value: A) => MaybePromise<B>): MaybePromise<B> {
-  if (value !== null && typeof value === "object" && typeof (value as PromiseLike<A>).then === "function") {
-    return Promise.resolve(value).then(fn);
-  }
-  return fn(value as A);
 }

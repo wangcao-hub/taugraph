@@ -1,7 +1,9 @@
-import { defineNode, type MaybePromise, type Node, type RetryPolicy, type RunContext } from "../index.js";
+import { defineNode, type Effect, type MaybePromise, type Node, type RetryPolicy, type RunContext } from "../index.js";
 
 export interface CodeNodeOptions {
   readonly retry?: RetryPolicy;
+  /** Declare `"write"` for code that changes the outside world, so replay will not repeat it. */
+  readonly effect?: Effect;
 }
 
 /**

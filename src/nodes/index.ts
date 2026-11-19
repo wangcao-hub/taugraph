@@ -2,6 +2,7 @@
 // `defineNode` + `ctx.trace.append` API, the same way third-party nodes are.
 
 export { CodeNode, type CodeNodeOptions } from "./code.js";
+export { HumanNode, type HumanNodeConfig } from "./human.js";
 export {
   type ChatMessage,
   type LLMModel,

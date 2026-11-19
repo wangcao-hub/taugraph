@@ -1,8 +1,16 @@
-import { type CompiledGraph, driveAsync, driveSync, execute, type Outgoing } from "./engine.js";
+import {
+  type CompiledGraph,
+  driveAsync,
+  driveSync,
+  execute,
+  type Outgoing,
+  type ResumePlan,
+  toJson,
+} from "./engine.js";
 import { TaugraphError } from "./errors.js";
 import type { StandardSchemaV1 } from "./standard-schema.js";
-import { assertTrace, recordedSteps } from "./trace.js";
-import type { Graph, GraphDefinition, Node, ReplayOptions, RunOptions, Trace } from "./types.js";
+import { assertTrace, recordedAnswers, recordedSteps, resumePoint } from "./trace.js";
+import type { Graph, GraphDefinition, Node, ReplayOptions, ResumeOptions, RunOptions, Trace } from "./types.js";
 
 /**
  * Declares a graph and checks it statically. Throws `INVALID_GRAPH` on any inconsistency,
@@ -18,6 +26,35 @@ export function createGraph<S, I, K extends string>(
   const graph = compile(schema as StandardSchemaV1<unknown, S>, definition as unknown as GraphDefinition<S, string>);
   const nodeIds = Object.freeze(Object.keys(definition.nodes) as K[]);
 
+  /** Every check that can reject a resume runs here, before anything is appended to the trace. */
+  const planResume = (trace: Trace, value: unknown, options: ResumeOptions): ResumePlan => {
+    const events = assertTrace(trace);
+    const point = resumePoint(events);
+    if (value !== undefined && point.kind !== "paused") {
+      throw new TaugraphError(
+        "NOT_RESUMABLE",
+        "The run is not waiting for a value. To continue an interrupted trace, call resume(trace) without a value.",
+      );
+    }
+    if (point.kind === "start") return { trace: events, point, value: undefined };
+    const node = graph.nodes[point.nodeId];
+    if (!Object.hasOwn(graph.nodes, point.nodeId) || !node) {
+      throw new TaugraphError(
+        "NOT_RESUMABLE",
+        `The trace continues at node "${point.nodeId}", which this graph does not have`,
+      );
+    }
+    if (point.kind === "running" && node.effect === "write" && !options.allowWrites) {
+      throw new TaugraphError(
+        "UNKNOWN_OUTCOME",
+        `Write node "${point.nodeId}" (step ${point.step}) was running when the trace ended, so its effect may or may not have happened. Check the external system, then resume with { allowWrites: true }; the node will see ctx.meta.recovered === true.`,
+        { nodeId: point.nodeId, step: point.step },
+      );
+    }
+    const json = value === undefined ? undefined : toJson(value, "Resume value is not plain JSON");
+    return { trace: events, point, value: json };
+  };
+
   return Object.freeze({
     start: definition.start,
     nodeIds,
@@ -29,6 +66,16 @@ export function createGraph<S, I, K extends string>(
 
     runSync(input: I, options: RunOptions = {}) {
       return driveSync(execute({ graph, input, options })) as never;
+    },
+
+    async resume(trace: Trace, value?: unknown, options: ResumeOptions = {}) {
+      const resume = planResume(trace, value, options);
+      return driveAsync(execute({ graph, options, resume }), options.signal) as never;
+    },
+
+    resumeSync(trace: Trace, value?: unknown, options: ResumeOptions = {}) {
+      const resume = planResume(trace, value, options);
+      return driveSync(execute({ graph, options, resume })) as never;
     },
 
     async replay(trace: Trace, options: ReplayOptions<S, K> = {}) {
@@ -49,6 +96,8 @@ export function createGraph<S, I, K extends string>(
         mode,
         overrides,
         recorded: mode === "recorded" ? recordedSteps(events) : new Map(),
+        answers: recordedAnswers(events),
+        allowWrites: options.allowWrites === true,
       };
       return driveAsync(execute({ graph, input: first.input, options, replay }), options.signal) as never;
     },
