@@ -22,6 +22,68 @@ In reinforcement learning, τ is the standard symbol for a trajectory: the seque
 
 If a model decides every step and gets each one right 95% of the time, a 3-step flow succeeds about 86% of the time and a 5-step flow about 77%. Better prompts move 95% to 97%, never to 100%. taugraph takes everything that can be written down in advance (what runs next, when to stop and ask, which calls change the world) out of the model and into a typed graph. The model is left with what only it can do, such as understanding a reply and picking one of a few allowed commands.
 
+## How it works
+
+A model is one kind of node among others. It writes a value into state; code reads that value and decides what happens next.
+
+```mermaid
+flowchart LR
+  reply(["user reply<br/>resume(trace, value)"]) --> ask
+  ask["confirm<br/>HumanNode · ctx.interrupt"] --> classify
+  classify["classify<br/>LLMNode<br/>output: one of 4 commands"] --> route{"conditional edge<br/>pure code"}
+  route -->|confirm| place["place order<br/>effect: write"]
+  route -->|modify| quote["quote<br/>code"]
+  route -->|explore| explain["explain<br/>code"]
+  route -->|cancel| cancelled["cancelled<br/>code"]
+  quote -.-> ask
+  explain -.-> ask
+  classDef human fill:#fef3c7,stroke:#d97706,color:#111
+  classDef model fill:#ede9fe,stroke:#7c3aed,color:#111
+  classDef code fill:#e0f2fe,stroke:#0284c7,color:#111
+  classDef write fill:#fee2e2,stroke:#dc2626,color:#111
+  class reply,ask human
+  class classify model
+  class route,quote,explain,cancelled code
+  class place write
+```
+
+<sub>The graph of [`examples/checkout.ts`](./examples/checkout.ts). Yellow waits for a person. Purple is the only place a model runs, and its output must parse as one of four commands. Blue is code you can unit-test. Red changes the outside world, so replays block it unless you allow it.</sub>
+
+Everything taugraph does after a run is computed from one append-only log. There is no second store to keep in sync.
+
+```mermaid
+flowchart LR
+  exec["run · resume"] -- "append, write-ahead" --> trace[("trace · JSONL<br/>state at every step<br/>LLM and tool calls<br/>human answers")]
+  trace -- "resume(trace, value)" --> pause["pause and resume<br/>no checkpointer"]
+  trace -- "resume(trace)" --> recover["crash recovery<br/>unfinished write: UNKNOWN_OUTCOME"]
+  trace -- "replay(trace, overrides)" --> cf["counterfactual replay<br/>writes blocked"]
+  trace -- "diffTraces · export" --> evals["regression evals"]
+  classDef log fill:#f1f5f9,stroke:#475569,color:#111
+  class trace log
+```
+
+## What's new in the design
+
+1. **The trace is the checkpoint.** Pause, resume and crash recovery are all derived from the append-only log, so the kernel has no checkpointer, thread store or storage interface. Store the JSONL wherever you like. (LangGraph's `interrupt()` needs a checkpointer and a thread id.)
+2. **Counterfactual replay.** A replayed step reuses its recorded output only when it receives exactly the recorded input state; any step that sees a different state runs live. "What if step 2 had used another model?" is one call, and the steps before the first change cost nothing. (LangGraph's replay re-executes every node after the checkpoint, LLM and API calls included. Durable-execution engines such as Temporal treat a divergence from history as a non-determinism error.)
+
+```mermaid
+flowchart LR
+  s0["step 0 · quote<br/>recorded"] --> s1["step 1 · confirm<br/>recorded answer: make it 2"] --> s2["step 2 · classify<br/>new model says: confirm"] --> s3["step 3 · place order<br/>WRITE_BLOCKED"]
+  classDef rec fill:#f1f5f9,stroke:#94a3b8,color:#111
+  classDef new fill:#ede9fe,stroke:#7c3aed,color:#111
+  classDef stop fill:#fee2e2,stroke:#dc2626,color:#111
+  class s0,s1 rec
+  class s2 new
+  class s3 stop
+```
+
+<sub>The checkout conversation replayed with an over-eager classifier. Steps 0 and 1 come from the trace, including the person's answer. The new model reads "make it 2" as a confirmation, so the run would now place an order; the replay stops there instead.</sub>
+
+3. **Replays don't repeat side effects unless you say so.** `effect: "write"` is part of the node, not a convention. Replays, and resumed replays, refuse to run a write node live unless you override it or pass `allowWrites: true`. A write that was running when the process died becomes `UNKNOWN_OUTCOME`, never a silent retry.
+4. **Conversations become test cases.** Human answers are stored in the trace as inputs. Replaying a human-in-the-loop run needs no human: each `ctx.interrupt` gets its recorded answer as long as the step sees the recorded state. (LangGraph fires interrupts again on replay.)
+5. **Models choose, code routes.** Routers are synchronous functions of the state; an async router is rejected at run time. A model can only write a schema-checked value into state, such as one of four commands, and the edge reads it. A router cannot await a model call, so model decisions happen in nodes, where the trace records them.
+
 ## Where it sits
 
 |                 | Pi                              | LangGraph                                 | taugraph                                      |

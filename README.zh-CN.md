@@ -22,6 +22,68 @@ npm install taugraph zod     # 也可以用任何 Standard Schema 库：valibot�
 
 如果每一步都由模型决定，且每步正确率是 95%，三步流程全程不出错的概率约 86%，五步约 77%。提示词优化能把 95% 提到 97%，但到不了 100%。taugraph 把能事先写清楚的事（下一步跑什么、什么时候停下来问人、哪些调用会改变外部世界）从模型手里拿出来，放进类型化的图；模型只做只有它能做的事，比如理解一句回复、从几个允许的命令里选一个。
 
+## 工作方式
+
+模型只是节点的一种。它把一个值写进状态，下一步做什么由代码读这个值来决定。
+
+```mermaid
+flowchart LR
+  reply(["用户回复<br/>resume(trace, value)"]) --> ask
+  ask["confirm<br/>HumanNode · ctx.interrupt"] --> classify
+  classify["classify<br/>LLMNode<br/>只能输出 4 个命令之一"] --> route{"条件边<br/>纯代码"}
+  route -->|confirm| place["下单<br/>effect: write"]
+  route -->|modify| quote["重新报价<br/>代码"]
+  route -->|explore| explain["回答问题<br/>代码"]
+  route -->|cancel| cancelled["取消<br/>代码"]
+  quote -.-> ask
+  explain -.-> ask
+  classDef human fill:#fef3c7,stroke:#d97706,color:#111
+  classDef model fill:#ede9fe,stroke:#7c3aed,color:#111
+  classDef code fill:#e0f2fe,stroke:#0284c7,color:#111
+  classDef write fill:#fee2e2,stroke:#dc2626,color:#111
+  class reply,ask human
+  class classify model
+  class route,quote,explain,cancelled code
+  class place write
+```
+
+<sub>[`examples/checkout.ts`](./examples/checkout.ts) 的流程图。黄色等人回复；紫色是唯一调用模型的地方，输出必须是四个命令之一；蓝色是可以单元测试的代码；红色会改变外部世界，回放时默认被拦截，除非你显式允许。</sub>
+
+一次运行之后能做的所有事，都从同一条只追加的日志算出来，没有第二份存储需要同步。
+
+```mermaid
+flowchart LR
+  exec["run · resume"] -- "追加，先写日志" --> trace[("trace · JSONL<br/>每一步的状态<br/>LLM 与工具调用<br/>人工回答")]
+  trace -- "resume(trace, value)" --> pause["暂停与恢复<br/>不需要 checkpointer"]
+  trace -- "resume(trace)" --> recover["崩溃恢复<br/>未完成的写操作: UNKNOWN_OUTCOME"]
+  trace -- "replay(trace, overrides)" --> cf["反事实回放<br/>拦截写操作"]
+  trace -- "diffTraces · 导出" --> evals["回归评测"]
+  classDef log fill:#f1f5f9,stroke:#475569,color:#111
+  class trace log
+```
+
+## 设计上的创新
+
+1. **trace 就是 checkpoint。** 暂停、恢复、崩溃恢复都从只追加的日志推出来，内核里没有 checkpointer、线程存储或存储接口，JSONL 存在哪里都行。（LangGraph 的 `interrupt()` 需要 checkpointer 和 thread id。）
+2. **反事实回放。** 回放时，一个步骤只有在收到的输入状态和录制时完全一致时才复用录制结果；看到不同状态的步骤都会实际执行。"如果第 2 步换个模型会怎样"只需要一次调用，第一个变化之前的步骤不产生任何调用开销。（LangGraph 回放会重新执行 checkpoint 之后的所有节点，包括 LLM 和 API 调用；Temporal 这类持久化执行引擎把偏离历史当作不确定性错误。）
+
+```mermaid
+flowchart LR
+  s0["第 0 步 · quote<br/>复用录制"] --> s1["第 1 步 · confirm<br/>复用人工回答: make it 2"] --> s2["第 2 步 · classify<br/>新模型判断为 confirm"] --> s3["第 3 步 · 下单<br/>WRITE_BLOCKED"]
+  classDef rec fill:#f1f5f9,stroke:#94a3b8,color:#111
+  classDef new fill:#ede9fe,stroke:#7c3aed,color:#111
+  classDef stop fill:#fee2e2,stroke:#dc2626,color:#111
+  class s0,s1 rec
+  class s2 new
+  class s3 stop
+```
+
+<sub>用一个过于激进的分类模型回放 checkout 对话。第 0、1 步来自 trace，包括用户当时的回答。新模型把 "make it 2" 当成了确认，这次运行本来会下单，回放在这里停下，没有真的下单。</sub>
+
+3. **回放默认不会重复副作用。** `effect: "write"` 是节点的一部分，不是约定。回放以及恢复中的回放都不会实际执行写节点，除非你覆盖它或传 `allowWrites: true`。进程崩溃时正在执行的写操作会变成 `UNKNOWN_OUTCOME`，不会被悄悄重试。
+4. **对话直接变成测试用例。** 人工回答作为输入记在 trace 里。回放带人工交互的运行不需要有人在场：只要步骤看到的状态和录制时一致，每个 `ctx.interrupt` 都拿到当时的回答。（LangGraph 回放时会重新触发 interrupt。）
+5. **模型只做选择，路由交给代码。** 路由是基于状态的同步函数，异步路由在运行时会被拒绝。模型只能往状态里写一个经过 schema 校验的值，比如四个命令之一，再由边读取这个值。路由里没法 await 模型调用，所以模型的决策只能发生在节点里，并由 trace 记录下来。
+
 ## 定位
 
 |              | Pi                              | LangGraph                     | taugraph                             |
