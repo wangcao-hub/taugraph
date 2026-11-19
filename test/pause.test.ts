@@ -233,6 +233,22 @@ describe("replay with recorded answers", () => {
     expect((await graph.replay(replayed.trace, { mode: "live" })).state).toEqual(done.state);
   });
 
+  it("reuses answers when the human node is the start node", async () => {
+    const graph = createGraph(schema, {
+      start: "ask",
+      nodes: {
+        ask: (s, ctx) => ({ ...s, approved: ctx.interrupt<boolean>("ok?") }),
+        done: (s) => s,
+      },
+      edges: [{ from: "ask", to: "done" }],
+      endNodes: ["done"],
+    });
+    const done = await graph.resume((await graph.run({ item: "x" })).trace, true);
+    const replayed = await graph.replay(done.trace, { mode: "live" });
+    expect(replayed.status).toBe("completed");
+    expect(replayed.state.approved).toBe(true);
+  });
+
   it("pauses when the state differs from the recording", async () => {
     const { graph } = approvalGraph();
     const done = await graph.resume((await graph.run({ item: "book" })).trace, true);

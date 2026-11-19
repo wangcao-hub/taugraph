@@ -72,7 +72,8 @@ type Start<S> =
       readonly nodeId: string;
       readonly step: number;
       readonly state: S;
-      readonly values: readonly unknown[];
+      /** Values for the first step's `ctx.interrupt`; undefined lets a replay supply recorded ones. */
+      readonly values: readonly unknown[] | undefined;
       readonly recovered: boolean;
     }
   | { readonly done: S };
@@ -182,7 +183,7 @@ function* beginRun<S>(
     },
   });
   const state = yield* validate(graph.schema, input, "Run input failed schema validation");
-  return { nodeId: graph.start, step: 0, state, values: [], recovered: false };
+  return { nodeId: graph.start, step: 0, state, values: undefined, recovered: false };
 }
 
 function* beginResume<S>(graph: CompiledGraph<S>, log: TraceLog, plan: ResumePlan): Effects<Start<S>> {
