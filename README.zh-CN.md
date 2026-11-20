@@ -150,6 +150,8 @@ console.log(diffTraces(trace, replay.trace)); // { equal: false, firstDivergence
 
 状态类型、输入类型、节点 id 全部从 schema 和 `nodes` 推断。边里写错节点名、节点返回结构不对，都是编译错误。
 
+TypeScript 5.9 以下的版本中，如果节点返回字面量值（例如联合类型字段里的 `outcome: "ordered"`），类型推断会失败，需要写成 `CodeNode<State>(...)`。TypeScript 5.9 和 7 不需要标注。
+
 ## 核心概念
 
 ### State
@@ -266,6 +268,15 @@ export const ToolNode = <S>(tool: Tool, apply: (s: S, out: unknown) => S) =>
     { kind: "tool" },
   );
 ```
+
+## 集成
+
+| 包                                                          | 用途                                                                                                              |
+| ----------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| [taugraph-mcp](https://github.com/wangcao-hub/taugraph-mcp) | 把流程作为 MCP 工具提供给任意 MCP 客户端：Claude、Cursor、Kiro、AgentScope Java 等。`npx -y taugraph-mcp ./flows` |
+| [taugraph-pi](https://github.com/wangcao-hub/taugraph-pi)   | 在 [Pi](https://pi.dev) 编程 agent 里把流程作为工具运行。`pi install npm:taugraph-pi`                             |
+
+两者都沿用同一种 trace 格式，通过它们录下的运行可以直接用本包回放和对比。
 
 ## 内核刻意不做
 

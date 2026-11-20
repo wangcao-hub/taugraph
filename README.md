@@ -150,6 +150,8 @@ console.log(diffTraces(trace, replay.trace)); // { equal: false, firstDivergence
 
 State, input and node ids are all inferred from the schema and `nodes`. A typo in an edge, or a node that returns the wrong shape, is a compile error.
 
+With TypeScript older than 5.9, a node that returns a literal value (for example `outcome: "ordered"` for a union field) is not inferred; write `CodeNode<State>(...)` there. TypeScript 5.9 and 7 need no annotation.
+
 ## Concepts
 
 ### State
@@ -266,6 +268,15 @@ export const ToolNode = <S>(tool: Tool, apply: (s: S, out: unknown) => S) =>
     { kind: "tool" },
   );
 ```
+
+## Integrations
+
+| Package                                                     | Use it to                                                                                                                   |
+| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| [taugraph-mcp](https://github.com/wangcao-hub/taugraph-mcp) | Serve flows as MCP tools to any MCP client: Claude, Cursor, Kiro, AgentScope Java and others. `npx -y taugraph-mcp ./flows` |
+| [taugraph-pi](https://github.com/wangcao-hub/taugraph-pi)   | Run flows as tools inside the [Pi](https://pi.dev) coding agent. `pi install npm:taugraph-pi`                               |
+
+Both keep the trace format, so runs recorded through them can be replayed and diffed with this package.
 
 ## Not in the kernel, on purpose
 
