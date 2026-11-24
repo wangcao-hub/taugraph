@@ -12,16 +12,11 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Added
 
 - Tool calling in the model contract: optional `tools` and `toolChoice` on `LLMRequest`, `toolCalls` on `LLMResponse`, `tool` messages and assistant `toolCalls` in `ChatMessage`. Tool definitions follow MCP (`name`, `description`, `inputSchema`); arguments are parsed JSON.
-- `taugraph/agent`: `createAgent` runs the model ↔ tools loop as a graph with one step per model call and one per tool call, so tracing, replay, write protection, crash recovery and approvals (`approve` → `ctx.interrupt`) apply to each call. `tool()` takes a Standard Schema for arguments and derives the JSON Schema through Standard JSON Schema. Bounded by `maxRounds` (default 8) and 32 calls per reply.
-- The OpenAI-compatible example adapter translates tools, tool calls and tool results; `pnpm example:agent`.
+- `taugraph/agent`: `createAgent` runs the model ↔ tools loop as a graph with one step per model call and one per tool call, so tracing, replay, write protection, crash recovery and approvals (`approve` → `ctx.interrupt`) apply to each call. `tool()` takes a Standard Schema for arguments and derives the JSON Schema through Standard JSON Schema. Bounded by `maxRounds` (default 8) and 32 calls per reply; calls beyond 32 get error answers after the results of the calls that ran.
+- The OpenAI-compatible example adapter translates tools, tool calls and tool results; `pnpm example:agent`. Missing call ids become `call_<round>_<index>`, and error results that do not already start with `Error` get an `Error: ` prefix because OpenAI's tool messages have no error flag.
 - Images in messages: `TextPart`, `ImagePart` (base64 `data` + `mimeType`, or a `url` that may be a reference of your own) and `ContentPart` in `taugraph/nodes`. `resolveImages(messages, resolve)` reads references when a request is sent, so traces can keep a few bytes per image; `textOf(content)` gives the text for text-only adapters.
 - Agent tools can return text and images (`{ content: ContentPart[] }`); the state schema checks parts and points at the bad one.
 - The OpenAI-compatible example adapter sends images, takes `resolveImage`, and moves images from tool results into a user message after them.
-
-### Fixed
-
-- Agent: the error answers for calls beyond the 32 per reply now come after the results of the calls that ran.
-- OpenAI-compatible example adapter: missing call ids are `call_<round>_<index>` instead of repeating `call_<index>` every round, and error results that do not already start with `Error` get an `Error: ` prefix because OpenAI's tool messages have no error flag.
 
 ## [0.2.0] - 2026-11-19
 
