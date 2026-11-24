@@ -2,7 +2,7 @@
 import { describe, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 import { createGraph, type RunResult } from "../src/index.js";
-import { CodeNode, LLMNode } from "../src/nodes/index.js";
+import { type ChatMessage, CodeNode, LLMNode } from "../src/nodes/index.js";
 
 const schema = z.object({
   question: z.string(),
@@ -12,6 +12,18 @@ type State = z.infer<typeof schema>;
 const model = { id: "m", complete: () => ({ content: "" }) };
 
 describe("type inference", () => {
+  it("tells chat messages apart by role", () => {
+    const tool: ChatMessage = { role: "tool", toolCallId: "c1", content: "ok" };
+    const assistant: ChatMessage = {
+      role: "assistant",
+      content: "",
+      toolCalls: [{ id: "c1", name: "t", arguments: {} }],
+    };
+    // @ts-expect-error a tool message needs the id of the call it answers
+    const broken: ChatMessage = { role: "tool", content: "ok" };
+    expectTypeOf([tool, assistant, broken]).toEqualTypeOf<ChatMessage[]>();
+  });
+
   it("infers state, input and node ids from the schema and nodes", () => {
     const graph = createGraph(schema, {
       start: "plan",

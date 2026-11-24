@@ -12,4 +12,7 @@ export {
   type LLMResponse,
   type LLMStructuredNodeConfig,
   type LLMTextNodeConfig,
+  type ToolCall,
+  type ToolChoice,
+  type ToolSpec,
 } from "./llm.js";

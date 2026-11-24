@@ -5,10 +5,32 @@ import { andThen, issuesMessage } from "./util.js";
 // Model contract. taugraph ships no provider; adapt any SDK or HTTP API to this.
 // ---------------------------------------------------------------------------
 
-export interface ChatMessage {
-  readonly role: "system" | "user" | "assistant";
-  readonly content: string;
+/** A tool the model may call. Field names follow MCP; `inputSchema` is JSON Schema for the arguments object. */
+export interface ToolSpec {
+  /** Letters, digits, `_` and `-`, at most 64 characters: what every major provider accepts. */
+  readonly name: string;
+  readonly description?: string;
+  readonly inputSchema: Readonly<Record<string, unknown>>;
 }
+
+/** A call the model asked for. Arguments are parsed JSON, as in MCP and Anthropic; adapters convert OpenAI's string. */
+export interface ToolCall {
+  readonly id: string;
+  readonly name: string;
+  readonly arguments: Readonly<Record<string, unknown>>;
+  /** Set by an adapter that could not read the arguments as a JSON object; `arguments` is then `{}`. */
+  readonly parseError?: string;
+}
+
+/** How the model may use tools: freely, not at all, at least one, or this one. */
+export type ToolChoice = "auto" | "none" | "required" | { readonly name: string };
+
+/** One message of a conversation. Every role has `content`; tool calls and their results have their own fields. */
+export type ChatMessage =
+  | { readonly role: "system"; readonly content: string }
+  | { readonly role: "user"; readonly content: string }
+  | { readonly role: "assistant"; readonly content: string; readonly toolCalls?: readonly ToolCall[] }
+  | { readonly role: "tool"; readonly toolCallId: string; readonly content: string; readonly isError?: boolean };
 
 /** Everything in a request is recorded in the trace, so keep it plain JSON. */
 export interface LLMRequest {
@@ -19,6 +41,9 @@ export interface LLMRequest {
   readonly responseFormat?: "text" | "json";
   /** Provider-specific options, passed through by the adapter. */
   readonly extra?: Readonly<Record<string, unknown>>;
+  /** Tools the model may call; adapters translate them to the provider's format. */
+  readonly tools?: readonly ToolSpec[];
+  readonly toolChoice?: ToolChoice;
 }
 
 export interface LLMResponse {
@@ -26,6 +51,8 @@ export interface LLMResponse {
   readonly model?: string;
   readonly finishReason?: string;
   readonly usage?: { readonly inputTokens?: number; readonly outputTokens?: number };
+  /** Tool calls the model asked for, in order. */
+  readonly toolCalls?: readonly ToolCall[];
 }
 
 export interface LLMModel {

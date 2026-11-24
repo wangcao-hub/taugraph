@@ -38,6 +38,36 @@ describe("CodeNode", () => {
 });
 
 describe("LLMNode", () => {
+  it("passes tools to the model and hands its tool calls to update", async () => {
+    const calls = [{ id: "c1", name: "weather", arguments: { city: "南京" } }];
+    const model: LLMModel = { id: "mock:tools", complete: () => ({ content: "", toolCalls: calls }) };
+    let seen: unknown;
+    const graph = createGraph(schema, {
+      start: "ask",
+      nodes: {
+        ask: LLMNode({
+          model,
+          prompt: (s) => ({
+            messages: [{ role: "user", content: s.question }],
+            tools: [{ name: "weather", inputSchema: { type: "object" } }],
+            toolChoice: "auto",
+          }),
+          update: (s, _text, response) => {
+            seen = response.toolCalls;
+            return s;
+          },
+        }),
+      },
+      endNodes: ["ask"],
+    });
+    const { trace } = await graph.run({ question: "天气" });
+    expect(seen).toEqual(calls);
+    expect(trace.find((e) => e.type === "llm_call")?.input).toMatchObject({
+      tools: [{ name: "weather" }],
+      toolChoice: "auto",
+    });
+  });
+
   it("turns a string prompt into a user message and records an llm_call event", async () => {
     const model = mockModel(["42"]);
     const graph = createGraph(schema, {
