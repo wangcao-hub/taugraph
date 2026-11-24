@@ -11,7 +11,7 @@
 // and is stored as JSONL between turns, as if the process restarted.
 import { z } from "zod";
 import { createGraph, diffTraces, fromJSONL, isTaugraphError, toJSONL } from "../src/index.js";
-import { CodeNode, HumanNode, type LLMModel, LLMNode } from "../src/nodes/index.js";
+import { CodeNode, HumanNode, type LLMModel, LLMNode, textOf } from "../src/nodes/index.js";
 import { modelFromEnv } from "./adapters/openai-compatible.js";
 
 const Command = z.enum(["confirm", "modify", "explore", "cancel"]);
@@ -34,7 +34,7 @@ const PRICES: Record<string, number> = { "coffee beans": 18 };
 const keywordModel: LLMModel = {
   id: "mock:keywords",
   complete(request) {
-    const text = (request.messages.at(-1)?.content ?? "").toLowerCase();
+    const text = textOf(request.messages.at(-1)?.content ?? "").toLowerCase();
     const qty = /\b(\d+)\b/.exec(text)?.[1];
     if (qty) return { content: JSON.stringify({ command: "modify", qty: Number(qty) }) };
     if (text.includes("?")) return { content: JSON.stringify({ command: "explore" }) };

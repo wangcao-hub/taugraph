@@ -2,8 +2,8 @@
 import { describe, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 import { type AgentNodeId, type AgentState, createAgent, tool } from "../src/agent/index.js";
-import { createGraph, type RunResult } from "../src/index.js";
-import { type ChatMessage, CodeNode, LLMNode } from "../src/nodes/index.js";
+import { createGraph, type MaybePromise, type RunResult } from "../src/index.js";
+import { type ChatMessage, CodeNode, type ImagePart, LLMNode, resolveImages, textOf } from "../src/nodes/index.js";
 
 const schema = z.object({
   question: z.string(),
@@ -36,6 +36,31 @@ describe("type inference", () => {
     // @ts-expect-error a tool message needs the id of the call it answers
     const broken: ChatMessage = { role: "tool", content: "ok" };
     expectTypeOf([tool, assistant, broken]).toEqualTypeOf<ChatMessage[]>();
+  });
+
+  it("lets user and tool messages carry images, and keeps system and assistant text", () => {
+    const user: ChatMessage = {
+      role: "user",
+      content: [
+        { type: "text", text: "what is this?" },
+        { type: "image", url: "media:a" },
+      ],
+    };
+    const result: ChatMessage = {
+      role: "tool",
+      toolCallId: "c1",
+      content: [{ type: "image", data: "", mimeType: "image/png" }],
+    };
+    // @ts-expect-error system messages are text
+    const system: ChatMessage = { role: "system", content: [{ type: "text", text: "x" }] };
+    // @ts-expect-error assistant messages are text
+    const assistant: ChatMessage = { role: "assistant", content: [{ type: "text", text: "x" }] };
+    // @ts-expect-error a base64 image needs its type
+    const untyped: ImagePart = { type: "image", data: "" };
+    expectTypeOf(textOf).returns.toEqualTypeOf<string>();
+    expectTypeOf(resolveImages).returns.toEqualTypeOf<MaybePromise<ChatMessage[]>>();
+    expectTypeOf([user, result, system, assistant]).toEqualTypeOf<ChatMessage[]>();
+    void untyped;
   });
 
   it("infers state, input and node ids from the schema and nodes", () => {

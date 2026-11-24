@@ -25,12 +25,37 @@ export interface ToolCall {
 /** How the model may use tools: freely, not at all, at least one, or this one. */
 export type ToolChoice = "auto" | "none" | "required" | { readonly name: string };
 
-/** One message of a conversation. Every role has `content`; tool calls and their results have their own fields. */
+/** Text in a message. */
+export interface TextPart {
+  readonly type: "text";
+  readonly text: string;
+}
+
+/**
+ * An image in a message: its bytes in base64 (`data`, without a `data:` prefix), or a URL. A URL may be `https:`,
+ * `data:`, or a reference of your own such as `media:abc` that the adapter reads when it calls the model, which keeps
+ * traces and snapshots small. Field names follow MCP.
+ */
+export type ImagePart =
+  | { readonly type: "image"; readonly data: string; readonly mimeType: string }
+  | { readonly type: "image"; readonly url: string; readonly mimeType?: string };
+
+export type ContentPart = TextPart | ImagePart;
+
+/** What a user message or a tool result carries: plain text, or text and images in order. */
+export type MessageContent = string | readonly ContentPart[];
+
+/** One message of a conversation. User messages and tool results may carry images; the others are text. */
 export type ChatMessage =
   | { readonly role: "system"; readonly content: string }
-  | { readonly role: "user"; readonly content: string }
+  | { readonly role: "user"; readonly content: MessageContent }
   | { readonly role: "assistant"; readonly content: string; readonly toolCalls?: readonly ToolCall[] }
-  | { readonly role: "tool"; readonly toolCallId: string; readonly content: string; readonly isError?: boolean };
+  | {
+      readonly role: "tool";
+      readonly toolCallId: string;
+      readonly content: MessageContent;
+      readonly isError?: boolean;
+    };
 
 /** Everything in a request is recorded in the trace, so keep it plain JSON. */
 export interface LLMRequest {

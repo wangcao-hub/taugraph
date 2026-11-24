@@ -2,7 +2,7 @@
 // fetch -> answer, then replay the run with the answer node swapped for a mock.
 import { z } from "zod";
 import { createGraph, diffTraces } from "../src/index.js";
-import { CodeNode, type LLMModel, LLMNode } from "../src/nodes/index.js";
+import { CodeNode, type LLMModel, LLMNode, textOf } from "../src/nodes/index.js";
 import { modelFromEnv } from "./adapters/openai-compatible.js";
 
 const schema = z.object({
@@ -15,7 +15,7 @@ const schema = z.object({
 //   TAUGRAPH_BASE_URL=http://localhost:11434/v1 TAUGRAPH_MODEL=qwen3 pnpm example:quickstart
 const echoModel: LLMModel = {
   id: "mock:echo",
-  complete: (request) => ({ content: `(mock) ${request.messages.at(-1)?.content}` }),
+  complete: (request) => ({ content: `(mock) ${textOf(request.messages.at(-1)?.content ?? "")}` }),
 };
 const model = modelFromEnv() ?? echoModel;
 

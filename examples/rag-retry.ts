@@ -11,7 +11,7 @@ import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
 import { createGraph, diffTraces, fromJSONL, type RunContext } from "../src/index.js";
-import { CodeNode, type LLMModel, LLMNode } from "../src/nodes/index.js";
+import { CodeNode, type LLMModel, LLMNode, textOf } from "../src/nodes/index.js";
 import { modelFromEnv } from "./adapters/openai-compatible.js";
 
 const schema = z.object({
@@ -39,7 +39,7 @@ function searchTool(query: string): string[] {
 // --- Models: a real one from env, or deterministic mocks.
 const mock = (id: string, style: (docs: string) => string): LLMModel => ({
   id,
-  complete: (request) => ({ content: style(request.messages.at(-1)?.content ?? "") }),
+  complete: (request) => ({ content: style(textOf(request.messages.at(-1)?.content ?? "")) }),
 });
 const model = modelFromEnv() ?? mock("mock:verbose", (prompt) => `Based on the notes: ${prompt.split("\n")[1]}`);
 const conciseModel = mock("mock:concise", () => "Orchestration = choosing the next step.");
