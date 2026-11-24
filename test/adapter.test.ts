@@ -4,6 +4,10 @@ import { fromOpenAIToolCalls, openAICompatible, toOpenAIMessages } from "../exam
 afterEach(() => vi.unstubAllGlobals());
 
 describe("OpenAI-compatible adapter", () => {
+  const png = { type: "image" as const, data: "iVBORw0KGgo=", mimeType: "image/png" };
+  const pngURL = { type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgo=" } };
+  const fn = (id: string, name: string) => ({ id, type: "function", function: { name, arguments: "{}" } });
+
   it("sends tools, tool choice, tool calls and tool results in OpenAI's shape", async () => {
     let body: Record<string, unknown> = {};
     vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
@@ -64,8 +68,113 @@ describe("OpenAI-compatible adapter", () => {
     ).toEqual([
       { id: "a", name: "t", arguments: {}, parseError: "arguments are not valid JSON" },
       { id: "b", name: "t", arguments: {}, parseError: "arguments are not a JSON object" },
-      { id: "call_2", name: "t", arguments: {} },
+      { id: "call_1_2", name: "t", arguments: {} },
     ]);
     expect(toOpenAIMessages([{ role: "system", content: "s" }])).toEqual([{ role: "system", content: "s" }]);
+  });
+
+  it("sends images in user messages, and moves images from tool results into a user message after them", () => {
+    expect(
+      toOpenAIMessages([
+        { role: "user", content: [{ type: "text", text: "比较" }, png, { type: "image", url: "https://x/a.jpg" }] },
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [
+            { id: "c1", name: "shot", arguments: {} },
+            { id: "c2", name: "shot", arguments: {} },
+            { id: "c3", name: "t", arguments: {} },
+          ],
+        },
+        { role: "tool", toolCallId: "c1", content: [{ type: "text", text: "页面" }, png] },
+        { role: "tool", toolCallId: "c2", content: [png] },
+        { role: "tool", toolCallId: "c3", content: "ok" },
+        { role: "assistant", content: "好" },
+      ]),
+    ).toEqual([
+      {
+        role: "user",
+        content: [{ type: "text", text: "比较" }, pngURL, { type: "image_url", image_url: { url: "https://x/a.jpg" } }],
+      },
+      { role: "assistant", content: null, tool_calls: [fn("c1", "shot"), fn("c2", "shot"), fn("c3", "t")] },
+      { role: "tool", tool_call_id: "c1", content: "页面" },
+      { role: "tool", tool_call_id: "c2", content: "(image)" },
+      { role: "tool", tool_call_id: "c3", content: "ok" },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Images from tool call c1:" },
+          pngURL,
+          { type: "text", text: "Images from tool call c2:" },
+          pngURL,
+        ],
+      },
+      { role: "assistant", content: "好" },
+    ]);
+  });
+
+  it("reads image references with resolveImage when it sends a request", async () => {
+    let body: Record<string, unknown> = {};
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      body = JSON.parse(String(init.body));
+      return Response.json({ choices: [{ message: { content: "猫" } }] });
+    });
+    const asked: string[] = [];
+    const model = openAICompatible({
+      baseURL: "http://x/v1",
+      model: "m",
+      resolveImage: (url) => {
+        asked.push(url);
+        return { type: "image", data: "QUJD", mimeType: "image/jpeg" };
+      },
+    });
+    const signal = new AbortController().signal;
+    const content = [
+      { type: "image" as const, url: "media:a" },
+      { type: "image" as const, url: "https://x/b.png" },
+    ];
+    await model.complete({ messages: [{ role: "user", content }] }, { signal });
+    expect(asked).toEqual(["media:a"]);
+    expect(body.messages).toEqual([
+      {
+        role: "user",
+        content: [
+          { type: "image_url", image_url: { url: "data:image/jpeg;base64,QUJD" } },
+          { type: "image_url", image_url: { url: "https://x/b.png" } },
+        ],
+      },
+    ]);
+    const plain = openAICompatible({ baseURL: "http://x/v1", model: "m" });
+    await expect(plain.complete({ messages: [{ role: "user", content }] }, { signal })).rejects.toThrow(/media:a/);
+    expect(() => toOpenAIMessages([{ role: "user", content }])).toThrow(/"media:a" must be read before sending/);
+  });
+
+  it("numbers missing call ids by round and tells the model which results are errors", async () => {
+    vi.stubGlobal("fetch", async () =>
+      Response.json({
+        choices: [{ message: { content: null, tool_calls: [{ function: { name: "t", arguments: "{}" } }] } }],
+      }),
+    );
+    const model = openAICompatible({ baseURL: "http://x/v1", model: "m" });
+    const response = await model.complete(
+      {
+        messages: [
+          { role: "user", content: "x" },
+          { role: "assistant", content: "", toolCalls: [{ id: "call_1_0", name: "t", arguments: {} }] },
+          { role: "tool", toolCallId: "call_1_0", content: "boom", isError: true },
+        ],
+      },
+      { signal: new AbortController().signal },
+    );
+    expect(response.toolCalls?.[0]?.id).toBe("call_2_0");
+    expect(
+      toOpenAIMessages([
+        { role: "tool", toolCallId: "a", content: "boom", isError: true },
+        { role: "tool", toolCallId: "b", content: "Error: boom", isError: true },
+      ]),
+    ).toEqual([
+      { role: "tool", tool_call_id: "a", content: "Error: boom" },
+      { role: "tool", tool_call_id: "b", content: "Error: boom" },
+    ]);
   });
 });

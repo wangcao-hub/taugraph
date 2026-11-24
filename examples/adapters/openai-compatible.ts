@@ -1,13 +1,27 @@
 // A small adapter from the LLMModel contract to any OpenAI-compatible /chat/completions endpoint:
-// OpenAI, Ollama, vLLM, LM Studio, DeepSeek, ... including tool calling.
+// OpenAI, Ollama, vLLM, LM Studio, DeepSeek, ... including tool calling and images.
 // It lives in examples on purpose: taugraph ships no provider code.
-import type { ChatMessage, LLMModel, ToolCall, ToolChoice, ToolSpec } from "../../src/nodes/index.js";
+import type { MaybePromise } from "../../src/index.js";
+import {
+  type ChatMessage,
+  type ImagePart,
+  type ImageResolver,
+  type LLMModel,
+  type MessageContent,
+  resolveImages,
+  type ToolCall,
+  type ToolChoice,
+  type ToolSpec,
+  textOf,
+} from "../../src/nodes/index.js";
 
 export interface OpenAICompatibleOptions {
   /** e.g. "https://api.openai.com/v1" or "http://localhost:11434/v1" for Ollama */
   readonly baseURL: string;
   readonly model: string;
   readonly apiKey?: string;
+  /** Reads image URLs OpenAI cannot fetch, e.g. `media:abc` from your store. http(s) and data: URLs go as they are. */
+  readonly resolveImage?: ImageResolver;
 }
 
 /** A tool call as OpenAI sends it: arguments are a JSON string. */
@@ -23,12 +37,52 @@ interface ChatCompletion {
   usage?: { prompt_tokens?: number; completion_tokens?: number };
 }
 
-/** taugraph messages in OpenAI's wire format. */
+/** URLs OpenAI takes as they are. */
+const SENDABLE = /^(https?|data):/i;
+const shown = (url: string): string => (url.length > 100 ? `${url.slice(0, 100)}…` : url);
+
+function imageURL(image: ImagePart): string {
+  if ("data" in image) return `data:${image.mimeType};base64,${image.data}`;
+  if (!SENDABLE.test(image.url)) {
+    throw new TypeError(`Image "${shown(image.url)}" must be read before sending; pass resolveImage`);
+  }
+  return image.url;
+}
+
+const imageOf = (image: ImagePart) => ({ type: "image_url", image_url: { url: imageURL(image) } });
+
+const imagesIn = (content: MessageContent): ImagePart[] =>
+  typeof content === "string" ? [] : content.filter((p): p is ImagePart => p.type === "image");
+
+/** OpenAI's tool messages take text only, and have no error flag: errors say so in the text. */
+function toolText(m: Extract<ChatMessage, { role: "tool" }>): string {
+  const text = textOf(m.content, { imagePlaceholder: "" }) || (imagesIn(m.content).length > 0 ? "(image)" : "");
+  return m.isError && !text.startsWith("Error") ? `Error: ${text}` : text;
+}
+
+/**
+ * taugraph messages in OpenAI's wire format. Images from tool results go into one user message right after the
+ * tool messages, since OpenAI's tool messages take text only. Image references must be read first (`resolveImage`).
+ */
 export function toOpenAIMessages(messages: readonly ChatMessage[]): Record<string, unknown>[] {
-  return messages.map((m) => {
-    if (m.role === "tool") return { role: "tool", tool_call_id: m.toolCallId, content: m.content };
+  const out: Record<string, unknown>[] = [];
+  let toolImages: Record<string, unknown>[] = [];
+  const flush = () => {
+    if (toolImages.length > 0) out.push({ role: "user", content: toolImages });
+    toolImages = [];
+  };
+  for (const m of messages) {
+    if (m.role === "tool") {
+      out.push({ role: "tool", tool_call_id: m.toolCallId, content: toolText(m) });
+      const images = imagesIn(m.content);
+      if (images.length > 0) {
+        toolImages.push({ type: "text", text: `Images from tool call ${m.toolCallId}:` }, ...images.map(imageOf));
+      }
+      continue;
+    }
+    flush();
     if (m.role === "assistant" && m.toolCalls?.length) {
-      return {
+      out.push({
         role: "assistant",
         content: m.content === "" ? null : m.content,
         tool_calls: m.toolCalls.map((c) => ({
@@ -36,10 +90,18 @@ export function toOpenAIMessages(messages: readonly ChatMessage[]): Record<strin
           type: "function",
           function: { name: c.name, arguments: JSON.stringify(c.arguments) },
         })),
-      };
+      });
+    } else if (m.role === "user" && typeof m.content !== "string") {
+      out.push({
+        role: "user",
+        content: m.content.map((p) => (p.type === "text" ? { type: "text", text: p.text } : imageOf(p))),
+      });
+    } else {
+      out.push({ role: m.role, content: m.content });
     }
-    return { role: m.role, content: m.content };
-  });
+  }
+  flush();
+  return out;
 }
 
 export function toOpenAITools(tools: readonly ToolSpec[]): Record<string, unknown>[] {
@@ -53,8 +115,8 @@ export function toOpenAIToolChoice(choice: ToolChoice): unknown {
   return typeof choice === "string" ? choice : { type: "function", function: { name: choice.name } };
 }
 
-/** OpenAI's tool calls as taugraph's, arguments parsed. Unreadable arguments become `{}` with a `parseError`. */
-export function fromOpenAIToolCalls(calls: readonly OpenAIToolCall[]): ToolCall[] {
+/** OpenAI's tool calls as taugraph's, arguments parsed. Unreadable arguments become `{}` with a `parseError`; missing ids become `call_<round>_<index>`. */
+export function fromOpenAIToolCalls(calls: readonly OpenAIToolCall[], round = 1): ToolCall[] {
   return calls.flatMap((c, i) => {
     const name = c.function?.name;
     if (!name) return [];
@@ -72,7 +134,7 @@ export function fromOpenAIToolCalls(calls: readonly OpenAIToolCall[]): ToolCall[
     if (!parseError && !isObject) parseError = "arguments are not a JSON object";
     return [
       {
-        id: c.id || `call_${i}`,
+        id: c.id || `call_${round}_${i}`,
         name,
         arguments: isObject && !parseError ? (parsed as Record<string, unknown>) : {},
         ...(parseError && { parseError }),
@@ -83,9 +145,15 @@ export function fromOpenAIToolCalls(calls: readonly OpenAIToolCall[]): ToolCall[
 
 export function openAICompatible(options: OpenAICompatibleOptions): LLMModel {
   const url = `${options.baseURL.replace(/\/+$/, "")}/chat/completions`;
+  const readImage = (image: string): MaybePromise<ImagePart> => {
+    if (/^https?:/i.test(image)) return { type: "image", url: image };
+    if (!options.resolveImage) throw new TypeError(`Image "${shown(image)}" needs resolveImage to be read`);
+    return options.resolveImage(image);
+  };
   return {
     id: `openai-compatible:${options.model}`,
     async complete(request, { signal }) {
+      const messages = await resolveImages(request.messages, readImage);
       const response = await fetch(url, {
         method: "POST",
         signal,
@@ -95,7 +163,7 @@ export function openAICompatible(options: OpenAICompatibleOptions): LLMModel {
         },
         body: JSON.stringify({
           model: options.model,
-          messages: toOpenAIMessages(request.messages),
+          messages: toOpenAIMessages(messages),
           temperature: request.temperature,
           max_tokens: request.maxTokens,
           ...(request.responseFormat === "json" && { response_format: { type: "json_object" } }),
@@ -110,12 +178,13 @@ export function openAICompatible(options: OpenAICompatibleOptions): LLMModel {
       const body = (await response.json()) as ChatCompletion;
       const choice = body.choices?.[0];
       const calls = choice?.message?.tool_calls;
+      const round = request.messages.filter((m) => m.role === "assistant").length + 1;
       return {
         content: choice?.message?.content ?? "",
         ...(body.model && { model: body.model }),
         ...(choice?.finish_reason && { finishReason: choice.finish_reason }),
         usage: { inputTokens: body.usage?.prompt_tokens ?? 0, outputTokens: body.usage?.completion_tokens ?? 0 },
-        ...(calls?.length && { toolCalls: fromOpenAIToolCalls(calls) }),
+        ...(calls?.length && { toolCalls: fromOpenAIToolCalls(calls, round) }),
       };
     },
   };
