@@ -225,6 +225,7 @@ describe("createAgent", () => {
     const results = state.messages.filter((m) => m.role === "tool");
     expect(results).toHaveLength(34);
     expect(results.filter((m) => m.isError).map((m) => m.toolCallId)).toEqual(["c32", "c33"]);
+    expect(results.map((m) => m.toolCallId)).toEqual(calls.map((c) => c.id)); // the refused ones come last
     expect(AGENT_DEFAULTS.maxCallsPerReply).toBe(32);
   });
 
@@ -261,6 +262,49 @@ describe("createAgent", () => {
     expect(() => createAgent({ model, tools: [weather, weather] })).toThrow(/two tools are named "weather"/);
     expect(() => createAgent({ model, maxRounds: 0 })).toThrow(/maxRounds/);
   });
+
+  it("passes images to the model and lets tools return them", async () => {
+    const screenshot = tool({
+      name: "screenshot",
+      run: () => ({
+        content: [
+          { type: "text", text: "the page" },
+          { type: "image", url: "media:shot1" },
+        ],
+      }),
+    });
+    const model = scripted([{ content: "", toolCalls: [call("c1", "screenshot")] }, { content: "a login form" }]);
+    const photo = { type: "image" as const, data: "iVBORw0KGgo=", mimeType: "image/png" };
+    const question = {
+      role: "user" as const,
+      content: [{ type: "text" as const, text: "what is on the page?" }, photo],
+    };
+    const { state, trace } = await createAgent({ model, tools: [screenshot] }).run({ messages: [question] });
+    expect(model.requests[0]?.messages[0]).toEqual(question);
+    const result = {
+      role: "tool",
+      toolCallId: "c1",
+      content: [
+        { type: "text", text: "the page" },
+        { type: "image", url: "media:shot1" },
+      ],
+    };
+    expect(state.messages[2]).toEqual(result);
+    expect(model.requests[1]?.messages.at(-1)).toEqual(result);
+    expect(trace.find((e) => e.type === "tool_call")?.output).toEqual({ content: result.content, isError: false });
+  });
+
+  it("fails the run when a tool returns content it cannot pass on", async () => {
+    const broken = tool({ name: "broken", run: () => ({ content: [{ type: "image" }] }) as never });
+    const model = scripted([{ content: "", toolCalls: [call("c1", "broken")] }]);
+    await expect(createAgent({ model, tools: [broken] }).run(ask("x"))).rejects.toThrow(
+      /Tool "broken" returned bad content: content\.0\.url: expected a string \(or data and mimeType\)/,
+    );
+    const odd = tool({ name: "odd", run: () => 42 as never });
+    await expect(
+      createAgent({ model: scripted([{ content: "", toolCalls: [call("c1", "odd")] }]), tools: [odd] }).run(ask("x")),
+    ).rejects.toThrow(/Tool "odd" returned neither a string nor \{ content: string \| ContentPart\[\] \}/);
+  });
 });
 
 describe("agentStateSchema", () => {
@@ -280,6 +324,34 @@ describe("agentStateSchema", () => {
       [["messages", 0, "toolCallId"], "expected a string"],
       [["messages", 1, "role"], 'expected "system", "user", "assistant" or "tool"'],
       [["rounds"], "expected a non-negative integer"],
+    ]);
+  });
+
+  it("accepts images in user and tool messages only, and points at a bad part", () => {
+    const image = { type: "image", url: "media:a" };
+    const ok = agentStateSchema["~standard"].validate({
+      messages: [
+        { role: "user", content: [{ type: "text", text: "hi" }, image] },
+        { role: "tool", toolCallId: "c1", content: [image] },
+      ],
+    });
+    expect("value" in ok).toBe(true);
+    const bad = agentStateSchema["~standard"].validate({
+      messages: [
+        {
+          role: "user",
+          content: [{ type: "text", text: "hi" }, { type: "image" }, { type: "image", data: "x" }, { type: "audio" }],
+        },
+        { role: "assistant", content: [{ type: "text", text: "no" }] },
+        { role: "user", content: 1 },
+      ],
+    });
+    expect("issues" in bad && bad.issues?.map((i) => [i.path, i.message])).toEqual([
+      [["messages", 0, "content", 1, "url"], "expected a string (or data and mimeType)"],
+      [["messages", 0, "content", 2, "mimeType"], "expected a string"],
+      [["messages", 0, "content", 3, "type"], 'expected "text" or "image"'],
+      [["messages", 1, "content"], "expected a string"],
+      [["messages", 2, "content"], "expected a string or an array of content parts"],
     ]);
   });
 });

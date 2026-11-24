@@ -42,6 +42,40 @@ function checkCall(value: unknown, path: Path, issues: Issue[]): void {
     issues.push({ message: "expected a string", path: [...path, "parseError"] });
 }
 
+function checkPart(value: unknown, path: Path, issues: Issue[]): void {
+  if (!isObject(value)) {
+    issues.push({ message: "expected a content part object", path });
+    return;
+  }
+  if (value.type === "text") {
+    if (typeof value.text !== "string") issues.push({ message: "expected a string", path: [...path, "text"] });
+    return;
+  }
+  if (value.type !== "image") {
+    issues.push({ message: 'expected "text" or "image"', path: [...path, "type"] });
+    return;
+  }
+  if (value.data !== undefined) {
+    if (typeof value.data !== "string") issues.push({ message: "expected a string", path: [...path, "data"] });
+    if (typeof value.mimeType !== "string") issues.push({ message: "expected a string", path: [...path, "mimeType"] });
+    return;
+  }
+  if (typeof value.url !== "string")
+    issues.push({ message: "expected a string (or data and mimeType)", path: [...path, "url"] });
+  if (value.mimeType !== undefined && typeof value.mimeType !== "string")
+    issues.push({ message: "expected a string", path: [...path, "mimeType"] });
+}
+
+/** Checks a message's `content`: a string, or, where `parts` is true, also an array of text and image parts. */
+export function checkContent(value: unknown, path: Path, issues: Issue[], parts: boolean): void {
+  if (typeof value === "string") return;
+  if (!parts || !Array.isArray(value)) {
+    issues.push({ message: parts ? "expected a string or an array of content parts" : "expected a string", path });
+    return;
+  }
+  for (const [i, part] of value.entries()) checkPart(part, [...path, i], issues);
+}
+
 function checkMessage(value: unknown, path: Path, issues: Issue[]): void {
   if (!isObject(value)) {
     issues.push({ message: "expected a message object", path });
@@ -52,7 +86,7 @@ function checkMessage(value: unknown, path: Path, issues: Issue[]): void {
     issues.push({ message: 'expected "system", "user", "assistant" or "tool"', path: [...path, "role"] });
     return;
   }
-  if (typeof value.content !== "string") issues.push({ message: "expected a string", path: [...path, "content"] });
+  checkContent(value.content, [...path, "content"], issues, role === "user" || role === "tool");
   if (role === "assistant" && value.toolCalls !== undefined) {
     if (!Array.isArray(value.toolCalls)) issues.push({ message: "expected an array", path: [...path, "toolCalls"] });
     else for (const [i, c] of value.toolCalls.entries()) checkCall(c, [...path, "toolCalls", i], issues);

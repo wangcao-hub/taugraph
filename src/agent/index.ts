@@ -18,11 +18,12 @@ import {
   type ChatMessage,
   type LLMModel,
   LLMNode,
+  type MessageContent,
   type ToolCall,
   type ToolChoice,
   type ToolSpec,
 } from "../nodes/index.js";
-import { type AgentInput, type AgentState, agentStateSchema } from "./state.js";
+import { type AgentInput, type AgentState, agentStateSchema, checkContent } from "./state.js";
 import { andThen, issuesText, settle } from "./util.js";
 
 export { type AgentInput, type AgentState, type AgentStop, agentStateSchema } from "./state.js";
@@ -36,8 +37,8 @@ export interface ToolContext {
   readonly recovered: boolean;
 }
 
-/** What a tool hands back to the model. `isError` tells the model the call did not work. */
-export type ToolResult = string | { readonly content: string; readonly isError?: boolean };
+/** A string, or text and images in order (`isError` tells the model the call failed). */
+export type ToolResult = string | { readonly content: MessageContent; readonly isError?: boolean };
 
 export interface Tool<A = ToolArgs> {
   readonly name: string;
@@ -113,7 +114,7 @@ function inputSchemaOf(t: AnyTool): Readonly<Record<string, unknown>> {
   }
 }
 
-const toolMessage = (id: string, content: string, isError: boolean): ChatMessage => ({
+const toolMessage = (id: string, content: MessageContent, isError: boolean): ChatMessage => ({
   role: "tool",
   toolCallId: id,
   content,
@@ -128,6 +129,16 @@ function lastAnswer(messages: readonly ChatMessage[]): string {
   return "";
 }
 
+/** Error answers for the calls of the last assistant message that have none: the ones beyond the per-reply limit. */
+function unanswered(messages: readonly ChatMessage[]): ChatMessage[] {
+  let i = messages.length - 1;
+  while (i >= 0 && messages[i]?.role !== "assistant") i--;
+  const last = messages[i];
+  if (last?.role !== "assistant" || !last.toolCalls) return [];
+  const done = new Set(messages.slice(i + 1).flatMap((m) => (m.role === "tool" ? [m.toolCallId] : [])));
+  return last.toolCalls.filter((c) => !done.has(c.id)).map((c) => toolMessage(c.id, TOO_MANY, true));
+}
+
 function readApproval(answer: unknown): { approved: boolean; reason?: string } {
   if (answer === true) return { approved: true };
   if (typeof answer !== "object" || answer === null) return { approved: false };
@@ -135,13 +146,16 @@ function readApproval(answer: unknown): { approved: boolean; reason?: string } {
   return { approved: approved === true, ...(typeof reason === "string" && reason !== "" && { reason }) };
 }
 
-function resultOf(t: AnyTool, value: unknown): { content: string; isError: boolean } {
+function resultOf(t: AnyTool, value: unknown): { content: MessageContent; isError: boolean } {
   if (typeof value === "string") return { content: value, isError: false };
-  if (typeof value === "object" && value !== null && typeof (value as { content?: unknown }).content === "string") {
-    const { content, isError } = value as { content: string; isError?: unknown };
-    return { content, isError: isError === true };
+  const content = typeof value === "object" && value !== null ? (value as { content?: unknown }).content : undefined;
+  if (typeof content !== "string" && !Array.isArray(content)) {
+    throw new TypeError(`Tool "${t.name}" returned neither a string nor { content: string | ContentPart[] }`);
   }
-  throw new TypeError(`Tool "${t.name}" returned neither a string nor { content: string }`);
+  const issues: StandardSchemaV1.Issue[] = [];
+  checkContent(content, ["content"], issues, true);
+  if (issues.length > 0) throw new TypeError(`Tool "${t.name}" returned bad content: ${issuesText(issues)}`);
+  return { content: content as MessageContent, isError: (value as { isError?: unknown }).isError === true };
 }
 
 /** The model <-> tools loop as a graph. Every model call and every tool call is a step of its own. */
@@ -178,7 +192,6 @@ export function createAgent(config: AgentConfig): AgentGraph {
       const round = s.rounds + 1;
       const calls = (response.toolCalls ?? []).map((c, i) => ({ ...c, id: c.id || `call_${round}_${i}` }));
       const run = calls.slice(0, AGENT_DEFAULTS.maxCallsPerReply);
-      const dropped = calls.slice(AGENT_DEFAULTS.maxCallsPerReply).map((c) => toolMessage(c.id, TOO_MANY, true));
       const assistant: ChatMessage = {
         role: "assistant",
         content: text,
@@ -186,7 +199,7 @@ export function createAgent(config: AgentConfig): AgentGraph {
       };
       return {
         ...s,
-        messages: [...s.messages, assistant, ...dropped],
+        messages: [...s.messages, assistant],
         pending: run,
         rounds: round,
         final: run.length === 0 ? text : null,
@@ -210,11 +223,15 @@ export function createAgent(config: AgentConfig): AgentGraph {
       (s, ctx: RunContext): MaybePromise<AgentState> => {
         const call = s.pending[0];
         if (!call) return s;
-        const answered = (content: string, isError: boolean): AgentState => ({
-          ...s,
-          messages: [...s.messages, toolMessage(call.id, content, isError)],
-          pending: s.pending.slice(1),
-        });
+        const answered = (content: MessageContent, isError: boolean): AgentState => {
+          const messages = [...s.messages, toolMessage(call.id, content, isError)];
+          // after the last call that runs, answer the ones beyond the per-reply limit, so they come last
+          return {
+            ...s,
+            messages: s.pending.length === 1 ? [...messages, ...unanswered(messages)] : messages,
+            pending: s.pending.slice(1),
+          };
+        };
         const t = tools.get(call.name);
         if (!t) return answered(`No tool named "${call.name}"`, true);
         if (call.parseError) return answered(`Invalid arguments: ${call.parseError}`, true);
@@ -229,7 +246,7 @@ export function createAgent(config: AgentConfig): AgentGraph {
             if (!approved) return answered(reason ? `${DENIED}: ${reason}` : DENIED, true);
           }
           const startedAt = Date.now();
-          const record = (content: string, isError: boolean, failed: boolean): AgentState => {
+          const record = (content: MessageContent, isError: boolean, failed: boolean): AgentState => {
             ctx.trace.append({
               type: "tool_call",
               input: { id: call.id, name: call.name, arguments: call.arguments },
