@@ -37,6 +37,10 @@
       "types": "./dist/nodes/index.d.ts",
       "import": "./dist/nodes/index.js"
     },
+    "./agent": {
+      "types": "./dist/agent/index.d.ts",
+      "import": "./dist/agent/index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

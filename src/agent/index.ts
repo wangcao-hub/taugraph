@@ -1,0 +1,292 @@
+// The model <-> tools loop as a taugraph graph: one step per model call and one step per tool call, so the trace,
+// replay, write protection, crash recovery and approvals all apply to every single call.
+//
+//   think --a call, read-->  act --------+-- more calls --> act / act_write
+//     |   --a call, write--> act_write --+-- none left ---> think
+//     +--no calls, or maxRounds reached--> finish
+import {
+  createGraph,
+  defineNode,
+  type Effect,
+  type Graph,
+  type MaybePromise,
+  type RetryPolicy,
+  type RunContext,
+  type StandardSchemaV1,
+} from "../index.js";
+import {
+  type ChatMessage,
+  type LLMModel,
+  LLMNode,
+  type ToolCall,
+  type ToolChoice,
+  type ToolSpec,
+} from "../nodes/index.js";
+import { type AgentInput, type AgentState, agentStateSchema } from "./state.js";
+import { andThen, issuesText, settle } from "./util.js";
+
+export { type AgentInput, type AgentState, type AgentStop, agentStateSchema } from "./state.js";
+
+export type ToolArgs = Readonly<Record<string, unknown>>;
+
+export interface ToolContext {
+  readonly call: ToolCall;
+  readonly signal: AbortSignal;
+  /** The step was running when an earlier trace ended and was started again. */
+  readonly recovered: boolean;
+}
+
+/** What a tool hands back to the model. `isError` tells the model the call did not work. */
+export type ToolResult = string | { readonly content: string; readonly isError?: boolean };
+
+export interface Tool<A = ToolArgs> {
+  readonly name: string;
+  readonly description?: string;
+  /** Validates the arguments, and becomes the JSON Schema the model sees (Standard JSON Schema). */
+  readonly input?: StandardSchemaV1<unknown, A>;
+  /** JSON Schema for the model, when `input` cannot produce one or you want your own. Wins over `input`. */
+  readonly inputSchema?: Readonly<Record<string, unknown>>;
+  /** `"write"` for tools that change the outside world: they run in a write step, never repeated by replay. */
+  readonly effect?: Effect;
+  run(args: A, ctx: ToolContext): MaybePromise<ToolResult>;
+}
+
+/** Defines a tool. Returns it unchanged; it only lets `args` take its type from `input`. */
+export function tool<A = ToolArgs>(definition: Tool<A>): Tool<A> {
+  return definition;
+}
+
+export type ApprovalDecision = "run" | "deny" | "ask";
+
+/** Recorded by the pause when a call waits for approval. Resume with `true`, `false` or `{ approved, reason? }`. */
+export interface ToolApprovalRequest {
+  readonly type: "tool_approval";
+  readonly call: ToolCall;
+  readonly effect: Effect;
+}
+
+// biome-ignore lint/suspicious/noExplicitAny: each tool has its own argument type
+type AnyTool = Tool<any>;
+
+export interface AgentConfig {
+  readonly model: LLMModel;
+  readonly tools?: readonly AnyTool[];
+  readonly system?: string;
+  /** Model calls allowed in one run. Default 8. */
+  readonly maxRounds?: number;
+  readonly toolChoice?: ToolChoice;
+  readonly temperature?: number;
+  readonly maxTokens?: number;
+  /** Retries a failed model call. */
+  readonly retry?: RetryPolicy;
+  /**
+   * Decides each call before it runs: run it, refuse it, or pause and ask (`ctx.interrupt`). Called again when
+   * the run resumes, so keep it pure. Without it every call runs.
+   */
+  readonly approve?: (call: ToolCall, tool: AnyTool, state: AgentState) => ApprovalDecision;
+}
+
+export type AgentNodeId = "think" | "act" | "act_write" | "finish";
+export type AgentGraph = Graph<AgentState, AgentInput, AgentNodeId>;
+
+export const AGENT_DEFAULTS = Object.freeze({ maxRounds: 8, maxCallsPerReply: 32, maxSteps: 1000 });
+
+const TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
+const DENIED = "The user did not allow this call";
+const TOO_MANY = `Too many tool calls in one reply; at most ${AGENT_DEFAULTS.maxCallsPerReply} run`;
+
+interface JSONSchemaProps {
+  readonly jsonSchema?: { readonly input: (options: { readonly target: string }) => Record<string, unknown> };
+}
+
+function inputSchemaOf(t: AnyTool): Readonly<Record<string, unknown>> {
+  if (t.inputSchema) return t.inputSchema;
+  const converter = (t.input?.["~standard"] as JSONSchemaProps | undefined)?.jsonSchema;
+  if (!converter) return { type: "object" };
+  try {
+    const json = converter.input({ target: "draft-2020-12" });
+    return Object.fromEntries(Object.entries(json).filter(([key]) => key !== "$schema"));
+  } catch (cause) {
+    throw new TypeError(`createAgent: the input schema of tool "${t.name}" has no JSON Schema form; pass inputSchema`, {
+      cause,
+    });
+  }
+}
+
+const toolMessage = (id: string, content: string, isError: boolean): ChatMessage => ({
+  role: "tool",
+  toolCallId: id,
+  content,
+  ...(isError && { isError: true }),
+});
+
+function lastAnswer(messages: readonly ChatMessage[]): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (m?.role === "assistant") return m.content;
+  }
+  return "";
+}
+
+function readApproval(answer: unknown): { approved: boolean; reason?: string } {
+  if (answer === true) return { approved: true };
+  if (typeof answer !== "object" || answer === null) return { approved: false };
+  const { approved, reason } = answer as { approved?: unknown; reason?: unknown };
+  return { approved: approved === true, ...(typeof reason === "string" && reason !== "" && { reason }) };
+}
+
+function resultOf(t: AnyTool, value: unknown): { content: string; isError: boolean } {
+  if (typeof value === "string") return { content: value, isError: false };
+  if (typeof value === "object" && value !== null && typeof (value as { content?: unknown }).content === "string") {
+    const { content, isError } = value as { content: string; isError?: unknown };
+    return { content, isError: isError === true };
+  }
+  throw new TypeError(`Tool "${t.name}" returned neither a string nor { content: string }`);
+}
+
+/** The model <-> tools loop as a graph. Every model call and every tool call is a step of its own. */
+export function createAgent(config: AgentConfig): AgentGraph {
+  const tools = new Map<string, AnyTool>();
+  for (const t of config.tools ?? []) {
+    if (!TOOL_NAME.test(t.name)) throw new TypeError(`createAgent: tool name "${t.name}" must match ${TOOL_NAME}`);
+    if (tools.has(t.name)) throw new TypeError(`createAgent: two tools are named "${t.name}"`);
+    if (t.effect !== undefined && t.effect !== "read" && t.effect !== "write") {
+      throw new TypeError(`createAgent: tool "${t.name}" has effect ${String(t.effect)}; use "read" or "write"`);
+    }
+    tools.set(t.name, t);
+  }
+  const maxRounds = config.maxRounds ?? AGENT_DEFAULTS.maxRounds;
+  if (!Number.isInteger(maxRounds) || maxRounds < 1)
+    throw new TypeError("createAgent: maxRounds must be an integer >= 1");
+  const specs: ToolSpec[] = [...tools.values()].map((t) => ({
+    name: t.name,
+    ...(t.description && { description: t.description }),
+    inputSchema: inputSchemaOf(t),
+  }));
+
+  const callModel = LLMNode<AgentState>({
+    model: config.model,
+    ...(config.retry && { retry: config.retry }),
+    prompt: (s) => ({
+      messages: [...(config.system ? [{ role: "system" as const, content: config.system }] : []), ...s.messages],
+      ...(specs.length > 0 && { tools: specs }),
+      ...(config.toolChoice && { toolChoice: config.toolChoice }),
+      ...(config.temperature !== undefined && { temperature: config.temperature }),
+      ...(config.maxTokens !== undefined && { maxTokens: config.maxTokens }),
+    }),
+    update: (s, text, response) => {
+      const round = s.rounds + 1;
+      const calls = (response.toolCalls ?? []).map((c, i) => ({ ...c, id: c.id || `call_${round}_${i}` }));
+      const run = calls.slice(0, AGENT_DEFAULTS.maxCallsPerReply);
+      const dropped = calls.slice(AGENT_DEFAULTS.maxCallsPerReply).map((c) => toolMessage(c.id, TOO_MANY, true));
+      const assistant: ChatMessage = {
+        role: "assistant",
+        content: text,
+        ...(calls.length > 0 && { toolCalls: calls }),
+      };
+      return {
+        ...s,
+        messages: [...s.messages, assistant, ...dropped],
+        pending: run,
+        rounds: round,
+        final: run.length === 0 ? text : null,
+        stop: run.length === 0 ? "done" : null,
+      };
+    },
+  });
+
+  const think = defineNode<AgentState>(
+    (s, ctx) => {
+      if (s.pending.length > 0) return s; // calls left from where an earlier run stopped: run them first
+      if (s.rounds >= maxRounds) return { ...s, stop: "max_rounds", final: lastAnswer(s.messages) };
+      return callModel(s, ctx);
+    },
+    { kind: "llm", ...(config.retry && { retry: config.retry }) },
+  );
+
+  /** Runs `pending[0]`. Everything before the tool runs is pure, so re-running the step on resume is safe. */
+  const act = (effect: Effect) =>
+    defineNode<AgentState>(
+      (s, ctx: RunContext): MaybePromise<AgentState> => {
+        const call = s.pending[0];
+        if (!call) return s;
+        const answered = (content: string, isError: boolean): AgentState => ({
+          ...s,
+          messages: [...s.messages, toolMessage(call.id, content, isError)],
+          pending: s.pending.slice(1),
+        });
+        const t = tools.get(call.name);
+        if (!t) return answered(`No tool named "${call.name}"`, true);
+        if (call.parseError) return answered(`Invalid arguments: ${call.parseError}`, true);
+        const checked = t.input ? t.input["~standard"].validate(call.arguments) : { value: call.arguments };
+        return andThen(checked, (result): MaybePromise<AgentState> => {
+          if (result.issues) return answered(`Invalid arguments: ${issuesText(result.issues)}`, true);
+          const decision = config.approve?.(call, t, s) ?? "run";
+          if (decision === "deny") return answered(DENIED, true);
+          if (decision === "ask") {
+            const request: ToolApprovalRequest = { type: "tool_approval", call, effect };
+            const { approved, reason } = readApproval(ctx.interrupt<unknown>(request));
+            if (!approved) return answered(reason ? `${DENIED}: ${reason}` : DENIED, true);
+          }
+          const startedAt = Date.now();
+          const record = (content: string, isError: boolean, failed: boolean): AgentState => {
+            ctx.trace.append({
+              type: "tool_call",
+              input: { id: call.id, name: call.name, arguments: call.arguments },
+              output: { content, isError },
+              meta: { effect, durationMs: Date.now() - startedAt, ...(failed && { error: true }) },
+            });
+            return answered(content, isError);
+          };
+          return settle(
+            () => t.run(result.value, { call, signal: ctx.signal, recovered: ctx.meta.recovered }),
+            (value) => {
+              const { content, isError } = resultOf(t, value);
+              return record(content, isError, false);
+            },
+            (error) => {
+              if (ctx.signal.aborted) throw error; // a cancelled run stops; it is not the tool's answer
+              return record(String(error instanceof Error ? `Error: ${error.message}` : error), true, true);
+            },
+          );
+        });
+      },
+      { kind: "tool", ...(effect === "write" && { effect }) },
+    );
+
+  const next = (s: AgentState): AgentNodeId => {
+    const call = s.pending[0];
+    if (call) return tools.get(call.name)?.effect === "write" ? "act_write" : "act";
+    return s.stop ? "finish" : "think";
+  };
+
+  const graph = createGraph(agentStateSchema, {
+    start: "think",
+    nodes: {
+      think,
+      act: act("read"),
+      act_write: act("write"),
+      finish: defineNode<AgentState>((s) => s, { kind: "code" }),
+    },
+    conditionalEdges: [
+      { from: "think", route: next, targets: ["act", "act_write", "finish"] },
+      { from: "act", route: next, targets: ["act", "act_write", "think"] },
+      { from: "act_write", route: next, targets: ["act", "act_write", "think"] },
+    ],
+    endNodes: ["finish"],
+  });
+
+  // maxRounds is the real bound; the kernel's step guard only has to leave room for every call of every round.
+  const steps = <O extends { readonly maxSteps?: number }>(options?: O): O =>
+    ({ ...options, maxSteps: options?.maxSteps ?? AGENT_DEFAULTS.maxSteps }) as O;
+  return Object.freeze({
+    start: graph.start,
+    nodeIds: graph.nodeIds,
+    endNodes: graph.endNodes,
+    run: (input, options) => graph.run(input, steps(options)),
+    runSync: (input, options) => graph.runSync(input, steps(options)),
+    resume: (trace, value, options) => graph.resume(trace, value, steps(options)),
+    resumeSync: (trace, value, options) => graph.resumeSync(trace, value, steps(options)),
+    replay: (trace, options) => graph.replay(trace, steps(options)),
+  } satisfies AgentGraph);
+}

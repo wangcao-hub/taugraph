@@ -1,6 +1,7 @@
 // Compile-time API guarantees. These assertions are checked by `pnpm typecheck`.
 import { describe, expectTypeOf, it } from "vitest";
 import { z } from "zod";
+import { type AgentNodeId, type AgentState, createAgent, tool } from "../src/agent/index.js";
 import { createGraph, type RunResult } from "../src/index.js";
 import { type ChatMessage, CodeNode, LLMNode } from "../src/nodes/index.js";
 
@@ -12,6 +13,19 @@ type State = z.infer<typeof schema>;
 const model = { id: "m", complete: () => ({ content: "" }) };
 
 describe("type inference", () => {
+  it("types a tool's arguments from its schema, and the agent's state", () => {
+    tool({
+      name: "weather",
+      input: z.object({ city: z.string() }),
+      run: (args) => {
+        expectTypeOf(args).toEqualTypeOf<{ city: string }>();
+        return "ok";
+      },
+    });
+    const agent = createAgent({ model });
+    expectTypeOf(agent.run).returns.resolves.toEqualTypeOf<RunResult<AgentState, AgentNodeId>>();
+  });
+
   it("tells chat messages apart by role", () => {
     const tool: ChatMessage = { role: "tool", toolCallId: "c1", content: "ok" };
     const assistant: ChatMessage = {
