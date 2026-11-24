@@ -315,7 +315,7 @@ think ──no calls, or maxRounds──▶ finish
 - Tool definitions follow MCP (`name`, `description`, `inputSchema` as JSON Schema). A tool's JSON Schema comes from `inputSchema` if given, else from `input` through [Standard JSON Schema](https://standardschema.dev/json-schema) (Zod 4, Valibot, ArkType).
 - Invalid arguments, unknown tools, unreadable arguments and thrown errors go back to the model as error results; the loop continues.
 - `maxRounds` (default 8) bounds model calls; at most 32 calls run per reply. Each tool run is a `tool_call` event.
-- Models: the call contract gained optional `tools`, `toolChoice` and `toolCalls`, and `tool` messages. The [OpenAI-compatible adapter](./examples/adapters/openai-compatible.ts) translates them. `pnpm example:agent` runs the whole thing.
+- Models: the call contract gained optional `tools`, `toolChoice` and `toolCalls`, and `tool` messages. An adapter that maps `role` itself needs a `tool` branch. The [OpenAI-compatible adapter](./examples/adapters/openai-compatible.ts) translates them. `pnpm example:agent` runs the whole thing.
 
 ## Integrations
 

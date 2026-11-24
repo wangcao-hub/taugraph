@@ -4,9 +4,13 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Changed
+
+- Types: `ChatMessage` is now a union by `role` and includes `role: "tool"`. Code that only reads `role` and `content` is unaffected, and nothing changes at run time for code that sends no tool messages. An adapter that maps `role` into a provider SDK's message type, or switches over `role` exhaustively, needs a `tool` branch; TypeScript points to the line.
+
 ### Added
 
-- Tool calling in the model contract: optional `tools` and `toolChoice` on `LLMRequest`, `toolCalls` on `LLMResponse`, `tool` messages and assistant `toolCalls` in `ChatMessage` (now a union by `role`). Tool definitions follow MCP (`name`, `description`, `inputSchema`); arguments are parsed JSON. Existing adapters keep working.
+- Tool calling in the model contract: optional `tools` and `toolChoice` on `LLMRequest`, `toolCalls` on `LLMResponse`, `tool` messages and assistant `toolCalls` in `ChatMessage`. Tool definitions follow MCP (`name`, `description`, `inputSchema`); arguments are parsed JSON.
 - `taugraph/agent`: `createAgent` runs the model ↔ tools loop as a graph with one step per model call and one per tool call, so tracing, replay, write protection, crash recovery and approvals (`approve` → `ctx.interrupt`) apply to each call. `tool()` takes a Standard Schema for arguments and derives the JSON Schema through Standard JSON Schema. Bounded by `maxRounds` (default 8) and 32 calls per reply.
 - The OpenAI-compatible example adapter translates tools, tool calls and tool results; `pnpm example:agent`.
 

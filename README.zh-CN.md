@@ -315,7 +315,7 @@ think ──没有调用，或到了 maxRounds──▶ finish
 - 工具定义沿用 MCP 的字段（`name`、`description`，`inputSchema` 是 JSON Schema）。给了 `inputSchema` 就用它，否则通过 [Standard JSON Schema](https://standardschema.dev/json-schema) 从 `input` 生成（Zod 4、Valibot、ArkType）。
 - 参数不合 schema、工具不存在、参数读不懂、工具抛错，都作为错误结果交回模型，循环继续。
 - `maxRounds`（默认 8）限制模型调用次数；一次回复最多执行 32 个调用。每次工具执行是一条 `tool_call` 事件。
-- 模型接口新增可选的 `tools`、`toolChoice`、`toolCalls`，以及 `tool` 消息；[OpenAI 兼容适配器](./examples/adapters/openai-compatible.ts) 负责转换。`pnpm example:agent` 能把整套跑一遍。
+- 模型接口新增可选的 `tools`、`toolChoice`、`toolCalls`，以及 `tool` 消息（自己转换 `role` 的适配器要补一个 `tool` 分支）；[OpenAI 兼容适配器](./examples/adapters/openai-compatible.ts) 负责转换。`pnpm example:agent` 能把整套跑一遍。
 
 ## 集成
 
