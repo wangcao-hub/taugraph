@@ -240,11 +240,11 @@ Every failure is a `TaugraphError` with a `code` (`INVALID_GRAPH`, `INVALID_STAT
 
 ## Plugin nodes (`taugraph/nodes`)
 
-| Node        | What it does                                                                                   |
-| ----------- | ---------------------------------------------------------------------------------------------- |
-| `CodeNode`  | Deterministic state transformation.                                                            |
-| `LLMNode`   | Calls an `LLMModel`, records an `llm_call` event, optionally parses JSON output with a schema. |
-| `HumanNode` | Pauses for an answer via `ctx.interrupt`, validates it with a schema, asks again if invalid.   |
+| Node        | What it does                                                                                                    |
+| ----------- | --------------------------------------------------------------------------------------------------------------- |
+| `CodeNode`  | Deterministic state transformation.                                                                             |
+| `LLMNode`   | Calls an `LLMModel` (tools included), records an `llm_call` event, optionally parses JSON output with a schema. |
+| `HumanNode` | Pauses for an answer via `ctx.interrupt`, validates it with a schema, asks again if invalid.                    |
 
 `LLMNode` only defines the call contract (`{ id, complete(request, { signal }) }`); bring OpenAI, Ollama or anything else through a small adapter. A 40-line OpenAI-compatible one is in [`examples/adapters`](./examples/adapters/openai-compatible.ts).
 
@@ -268,6 +268,54 @@ export const ToolNode = <S>(tool: Tool, apply: (s: S, out: unknown) => S) =>
     { kind: "tool" },
   );
 ```
+
+## Agent (`taugraph/agent`)
+
+`createAgent` turns the model ↔ tools loop into an ordinary taugraph graph. Each model call and each tool call is a step of its own, so everything above applies to every single call: it is in the trace, replay reuses it, a replay never repeats a write, a crash mid-write stops with `UNKNOWN_OUTCOME`, and a call can wait for a human.
+
+```ts
+import { createAgent, tool } from "taugraph/agent";
+import { z } from "zod";
+
+const weather = tool({
+  name: "weather",
+  description: "Today's weather for a city",
+  input: z.object({ city: z.string() }), // validates arguments and becomes the JSON Schema the model sees
+  run: ({ city }) => `${city}: cloudy, -2~5°C`,
+});
+
+const addTodo = tool({
+  name: "add_todo",
+  effect: "write", // runs in a write step
+  input: z.object({ text: z.string() }),
+  run: ({ text }) => `added "${text}"`,
+});
+
+const agent = createAgent({
+  model, // any LLMModel whose adapter supports tools
+  tools: [weather, addTodo],
+  system: "You help with the day.",
+  approve: (call, t) => (t.effect === "write" ? "ask" : "run"),
+});
+
+const result = await agent.run({ messages: [{ role: "user", content: "What should I wear today?" }] });
+// paused on add_todo: result.pending.request is { type: "tool_approval", call, effect: "write" }
+const done = await agent.resume(result.trace, true); // or false, or { approved: false, reason }
+console.log(done.state.final);
+```
+
+```
+think ──a read call──▶ act ───────┐
+  ▲   ──a write call─▶ act_write ─┤  more calls: act / act_write
+  └───────────────────────────────┘  none left: think
+think ──no calls, or maxRounds──▶ finish
+```
+
+- The state is `{ messages, pending, rounds, final, stop }`, validated by a built-in Standard Schema (no validator needed).
+- Tool definitions follow MCP (`name`, `description`, `inputSchema` as JSON Schema). A tool's JSON Schema comes from `inputSchema` if given, else from `input` through [Standard JSON Schema](https://standardschema.dev/json-schema) (Zod 4, Valibot, ArkType).
+- Invalid arguments, unknown tools, unreadable arguments and thrown errors go back to the model as error results; the loop continues.
+- `maxRounds` (default 8) bounds model calls; at most 32 calls run per reply. Each tool run is a `tool_call` event.
+- Models: the call contract gained optional `tools`, `toolChoice` and `toolCalls`, and `tool` messages. The [OpenAI-compatible adapter](./examples/adapters/openai-compatible.ts) translates them. `pnpm example:agent` runs the whole thing.
 
 ## Integrations
 

@@ -57,6 +57,12 @@ The same function recovers a trace that ended mid-run, for example after a crash
 
 `onEvent` is called before the run continues, and a sink failure stops the run with `SINK_FAILED`. Otherwise a step could run, perhaps a write, after the event that announced it was lost, and the stored trace could no longer be resumed correctly. The sink is synchronous to keep `runSync` possible; buffer in the sink if your storage is asynchronous and you accept the weaker guarantee.
 
+## The tool loop is a graph, not a node
+
+`createAgent` could have been one node that loops over model and tool calls internally. Every guarantee would then apply to the whole loop only: replay would reuse or rerun all of it, a single write tool would make the whole loop a write node, and an approval would rerun every call before it. As a graph with one step per model call and one per tool call, the existing rules land on exactly one call each, and write tools get their own `act_write` node so `effect: "write"` stays a static property of a node. Calls from one reply run one after another; running them in parallel waits for parallel nodes.
+
+Tool calls carry parsed arguments, as in MCP and Anthropic, because a trace of JSON strings inside JSON is hard to read and diff; adapters convert OpenAI's string form and report unreadable arguments in `parseError` instead of guessing.
+
 ## `LLMNode` takes a model contract, not a callback
 
 `LLMNode(async (s) => await client.chat(...))` would hide the call from the trace. `LLMNode({ model, prompt, update })` lets the node record the exact request and response as an `llm_call` event, and lets replay swap `model` without touching prompt logic. The node stays synchronous when the model is, so mock models work in `runSync`.

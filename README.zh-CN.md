@@ -240,11 +240,11 @@ graph.replay(trace, { overrides?, mode?: "recorded" | "live", allowWrites? })
 
 ## 插件节点（`taugraph/nodes`）
 
-| 节点        | 作用                                                                      |
-| ----------- | ------------------------------------------------------------------------- |
-| `CodeNode`  | 确定性的状态转换                                                          |
-| `LLMNode`   | 调用 `LLMModel`，记录 `llm_call` 事件，可选用 schema 解析 JSON 结构化输出 |
-| `HumanNode` | 通过 `ctx.interrupt` 暂停等待回答，用 schema 校验，不合法就再问一次       |
+| 节点        | 作用                                                                                    |
+| ----------- | --------------------------------------------------------------------------------------- |
+| `CodeNode`  | 确定性的状态转换                                                                        |
+| `LLMNode`   | 调用 `LLMModel`（含工具调用），记录 `llm_call` 事件，可选用 schema 解析 JSON 结构化输出 |
+| `HumanNode` | 通过 `ctx.interrupt` 暂停等待回答，用 schema 校验，不合法就再问一次                     |
 
 `LLMNode` 只定义调用契约（`{ id, complete(request, { signal }) }`），OpenAI、Ollama 等通过小适配器接入。[`examples/adapters`](./examples/adapters/openai-compatible.ts) 里有一个 40 行的 OpenAI 兼容适配器。
 
@@ -268,6 +268,54 @@ export const ToolNode = <S>(tool: Tool, apply: (s: S, out: unknown) => S) =>
     { kind: "tool" },
   );
 ```
+
+## Agent（`taugraph/agent`）
+
+`createAgent` 把"模型 ↔ 工具"循环变成一张普通的 taugraph 图。每次模型调用、每次工具调用都是单独的一步，所以上面说的保证落到每一次调用上：都在 trace 里，回放时复用，回放不重复写操作，写到一半崩溃会停在 `UNKNOWN_OUTCOME`，也能停下来等人批准。
+
+```ts
+import { createAgent, tool } from "taugraph/agent";
+import { z } from "zod";
+
+const weather = tool({
+  name: "weather",
+  description: "Today's weather for a city",
+  input: z.object({ city: z.string() }), // 校验参数，也变成模型看到的 JSON Schema
+  run: ({ city }) => `${city}: cloudy, -2~5°C`,
+});
+
+const addTodo = tool({
+  name: "add_todo",
+  effect: "write", // 在写步骤里执行
+  input: z.object({ text: z.string() }),
+  run: ({ text }) => `added "${text}"`,
+});
+
+const agent = createAgent({
+  model, // 任何适配器支持工具调用的 LLMModel
+  tools: [weather, addTodo],
+  system: "You help with the day.",
+  approve: (call, t) => (t.effect === "write" ? "ask" : "run"),
+});
+
+const result = await agent.run({ messages: [{ role: "user", content: "今天穿什么？" }] });
+// 停在 add_todo：result.pending.request 是 { type: "tool_approval", call, effect: "write" }
+const done = await agent.resume(result.trace, true); // 或 false，或 { approved: false, reason }
+console.log(done.state.final);
+```
+
+```
+think ──读的调用──▶ act ────────┐
+  ▲   ──写的调用──▶ act_write ──┤  还有调用：act / act_write
+  └─────────────────────────────┘  没有了：think
+think ──没有调用，或到了 maxRounds──▶ finish
+```
+
+- 状态是 `{ messages, pending, rounds, final, stop }`，用内置的 Standard Schema 校验，不需要装校验库。
+- 工具定义沿用 MCP 的字段（`name`、`description`，`inputSchema` 是 JSON Schema）。给了 `inputSchema` 就用它，否则通过 [Standard JSON Schema](https://standardschema.dev/json-schema) 从 `input` 生成（Zod 4、Valibot、ArkType）。
+- 参数不合 schema、工具不存在、参数读不懂、工具抛错，都作为错误结果交回模型，循环继续。
+- `maxRounds`（默认 8）限制模型调用次数；一次回复最多执行 32 个调用。每次工具执行是一条 `tool_call` 事件。
+- 模型接口新增可选的 `tools`、`toolChoice`、`toolCalls`，以及 `tool` 消息；[OpenAI 兼容适配器](./examples/adapters/openai-compatible.ts) 负责转换。`pnpm example:agent` 能把整套跑一遍。
 
 ## 集成
 

@@ -38,10 +38,10 @@ Only the kernel writes these. `ctx.trace.append` rejects them.
 
 Written by nodes through `ctx.trace.append({ type, input?, output?, meta? })`. The kernel adds `seq`, `runId`, `timestamp`, `nodeId` and `step`, and copies the payload so later mutation cannot change history. Conventional types:
 
-| type        | written by | input          | output        | meta                  |
-| ----------- | ---------- | -------------- | ------------- | --------------------- |
-| `llm_call`  | `LLMNode`  | `LLMRequest`   | `LLMResponse` | `model`, `durationMs` |
-| `tool_call` | tool nodes | tool arguments | tool result   | free-form             |
+| type        | written by                | input                                            | output                                     | meta                                                                        |
+| ----------- | ------------------------- | ------------------------------------------------ | ------------------------------------------ | --------------------------------------------------------------------------- |
+| `llm_call`  | `LLMNode`                 | `LLMRequest`                                     | `LLMResponse`                              | `model`, `durationMs`                                                       |
+| `tool_call` | tool nodes; `createAgent` | tool arguments; agent: `{ id, name, arguments }` | tool result; agent: `{ content, isError }` | free-form; agent: `effect`, `durationMs`, `error: true` when the tool threw |
 
 Any other non-empty string is allowed for custom plugins. Prefix it (`myplugin.event`) to avoid collisions.
 

@@ -69,6 +69,7 @@
     "example:quickstart": "tsx examples/quickstart.ts",
     "example:rag": "tsx examples/rag-retry.ts",
     "example:checkout": "tsx examples/checkout.ts",
+    "example:agent": "tsx examples/agent.ts",
     "prepublishOnly": "pnpm check && pnpm build"
   },
   "devDependencies": {
