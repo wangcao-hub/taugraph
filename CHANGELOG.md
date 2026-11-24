@@ -21,7 +21,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Fixed
 
 - Agent: the error answers for calls beyond the 32 per reply now come after the results of the calls that ran.
-- OpenAI-compatible example adapter: missing call ids are `call_<round>_<index>` instead of repeating `call_<index>` every round, and error results start with `Error: ` because OpenAI's tool messages have no error flag.
+- OpenAI-compatible example adapter: missing call ids are `call_<round>_<index>` instead of repeating `call_<index>` every round, and error results that do not already start with `Error` get an `Error: ` prefix because OpenAI's tool messages have no error flag.
 
 ## [0.2.0] - 2026-11-19
 

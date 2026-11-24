@@ -109,7 +109,7 @@ export function resolveImages(messages: readonly ChatMessage[], resolve?: ImageR
 ## 7. 文档
 
 - README（中英文）：新增"图片"一节，写片段形状、引用地址的用法和一段 `resolveImage` 示例；"插件节点"表格补上片段类型和两个辅助函数。
-- `docs/trace-format.md`：`llm_call.input.messages` 和 `tool_call.output.content` 里可能有片段；建议用引用地址控制 trace 体积，并说明重放不调用模型，引用失效不影响重放。
+- `docs/trace-format.md`：`llm_call.input.messages` 和 `tool_call.output.content` 里可能有片段；建议用引用地址控制 trace 体积，并说明回放时只有重新执行的步骤（被覆盖的，或状态分歧之后的）需要读取引用。
 - `docs/design.md`：新增一节，写明为什么选 `string | 片段数组`，以及放弃"并列 `images` 字段"和"另加 `parts`"的原因。
 - `CHANGELOG.md` 的 Unreleased：在 `### Changed` 下加一条，以 `**Breaking:**` 开头，迁移方法写成一句话：只发文字的适配器把 `m.content` 换成 `textOf(m.content)`。`### Added` 写片段、两个辅助函数、工具返回图片、适配器的 `resolveImage`。`### Fixed` 写第 5 节三项。
 

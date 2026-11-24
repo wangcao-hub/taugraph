@@ -246,7 +246,7 @@ Every failure is a `TaugraphError` with a `code` (`INVALID_GRAPH`, `INVALID_STAT
 | `LLMNode`   | Calls an `LLMModel` (tools included), records an `llm_call` event, optionally parses JSON output with a schema. |
 | `HumanNode` | Pauses for an answer via `ctx.interrupt`, validates it with a schema, asks again if invalid.                    |
 
-`LLMNode` only defines the call contract (`{ id, complete(request, { signal }) }`); bring OpenAI, Ollama or anything else through a small adapter. A 40-line OpenAI-compatible one is in [`examples/adapters`](./examples/adapters/openai-compatible.ts). Messages can carry images; see [Images](#images).
+`LLMNode` only defines the call contract (`{ id, complete(request, { signal }) }`); bring OpenAI, Ollama or anything else through a small adapter. A small OpenAI-compatible one is in [`examples/adapters`](./examples/adapters/openai-compatible.ts). Messages can carry images; see [Images](#images).
 
 Writing your own node type takes one call to `defineNode`:
 
@@ -332,7 +332,7 @@ const question: ChatMessage = {
 };
 ```
 
-- A URL may be `https:`, `data:` or a reference of your own. The trace records every request and the agent sends the whole conversation each round, so a base64 image is stored again every round, while a reference costs a few bytes. Replay reuses recorded model calls, so a reference that no longer resolves only matters for steps that run live.
+- A URL may be `https:`, `data:` or a reference of your own. The trace stores the state at every step and every request, so a base64 image is stored again and again, while a reference costs a few bytes. Replay reuses the recorded result of every step that sees its recorded state, so a reference that no longer resolves only matters for steps that run again (overridden, or after the state diverges).
 - Tools return images the same way: `run: () => ({ content: [{ type: "text", text: "the page" }, { type: "image", url: "media:shot1" }] })`.
 - For adapters, `resolveImages(messages, resolve)` turns `data:` URLs into base64 and every other URL into what `resolve` returns. An adapter that sends text only uses `textOf(m.content)`, which throws on images unless given `{ imagePlaceholder }`, so a model never answers about a picture it did not get.
 - The [OpenAI-compatible adapter](./examples/adapters/openai-compatible.ts) sends http(s) and `data:` URLs as they are and reads the rest with `resolveImage`. OpenAI's tool messages take text only, so it moves tool images into a user message right after them.
