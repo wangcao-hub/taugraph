@@ -6,7 +6,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 
-- **Breaking:** the `content` of `user` and `tool` messages is `string | ContentPart[]`, so they can carry images. Code that builds messages is unaffected; code that reads `content` as a string no longer compiles. An adapter that sends text only replaces `m.content` with `textOf(m.content)`, which throws on images unless given `{ imagePlaceholder }`.
+- **Breaking:** the `content` of `user` and `tool` messages is `string | ContentPart[]`, so they can carry images. Code that builds messages is unaffected; code that reads `content` as a string no longer compiles. An adapter that sends text only replaces `m.content` with `textOf(m.content)`, which throws on images unless given `{ imagePlaceholder }`. Template strings, `+` and `String()` still compile but turn parts into `[object Object]`, and JavaScript adapters get no compile error, so search for reads of `content` too.
 - Types: `ChatMessage` is now a union by `role` and includes `role: "tool"`. Code that only reads `role` and `content` is unaffected, and nothing changes at run time for code that sends no tool messages. An adapter that maps `role` into a provider SDK's message type, or switches over `role` exhaustively, needs a `tool` branch; TypeScript points to the line.
 
 ### Added

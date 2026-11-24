@@ -34,7 +34,8 @@ export interface TextPart {
 /**
  * An image in a message: its bytes in base64 (`data`, without a `data:` prefix), or a URL. A URL may be `https:`,
  * `data:`, or a reference of your own such as `media:abc` that the adapter reads when it calls the model, which keeps
- * traces and snapshots small. Field names follow MCP.
+ * traces and snapshots small. Field names follow MCP. If both `data` and `url` are present, `data` wins; narrow with
+ * `"data" in image`.
  */
 export type ImagePart =
   | { readonly type: "image"; readonly data: string; readonly mimeType: string }

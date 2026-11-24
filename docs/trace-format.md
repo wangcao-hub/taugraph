@@ -45,7 +45,7 @@ Written by nodes through `ctx.trace.append({ type, input?, output?, meta? })`. T
 
 Any other non-empty string is allowed for custom plugins. Prefix it (`myplugin.event`) to avoid collisions.
 
-In `llm_call.input.messages` (the `content` of user and tool messages) and in the agent's `tool_call.output.content`, content is either a string or an array of parts: `{ type: "text", text }`, `{ type: "image", data, mimeType }` (base64) or `{ type: "image", url, mimeType? }`. A base64 image is stored again in every step's state and every `llm_call` that sends it; pass a reference as `url` and let the adapter read it to keep traces small. Replay reuses a step's recorded `exit` state when the step sees its recorded input, so references only have to resolve for steps that run again (`source` `live` or `override`).
+In `llm_call.input.messages` (the `content` of user and tool messages) and in the agent's `tool_call.output.content`, content is either a string or an array of parts: `{ type: "text", text }`, `{ type: "image", data, mimeType }` (base64) or `{ type: "image", url, mimeType? }`. A base64 image is stored again in every step's state and every `llm_call` that sends it; pass a reference as `url` and let the adapter read it to keep traces small. In `recorded` mode, replay reuses a step's recorded `exit` state when the step sees its recorded input, so references only have to resolve for steps that run again (`source` `live` or `override`).
 
 ## Shape of a run
 

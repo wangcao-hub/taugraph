@@ -44,7 +44,9 @@ const shown = (url: string): string => (url.length > 100 ? `${url.slice(0, 100)}
 function imageURL(image: ImagePart): string {
   if ("data" in image) return `data:${image.mimeType};base64,${image.data}`;
   if (!SENDABLE.test(image.url)) {
-    throw new TypeError(`Image "${shown(image.url)}" must be read before sending; pass resolveImage`);
+    throw new TypeError(
+      `Image "${shown(image.url)}" cannot be sent as a URL; make resolveImage return { data, mimeType } or an http(s) URL`,
+    );
   }
   return image.url;
 }

@@ -145,8 +145,20 @@ describe("OpenAI-compatible adapter", () => {
       },
     ]);
     const plain = openAICompatible({ baseURL: "http://x/v1", model: "m" });
-    await expect(plain.complete({ messages: [{ role: "user", content }] }, { signal })).rejects.toThrow(/media:a/);
-    expect(() => toOpenAIMessages([{ role: "user", content }])).toThrow(/"media:a" must be read before sending/);
+    await expect(plain.complete({ messages: [{ role: "user", content }] }, { signal })).rejects.toThrow(
+      'Image "media:a" needs resolveImage to be read',
+    );
+    expect(() => toOpenAIMessages([{ role: "user", content }])).toThrow(
+      'Image "media:a" cannot be sent as a URL; make resolveImage return { data, mimeType } or an http(s) URL',
+    );
+    const toURL = openAICompatible({
+      baseURL: "http://x/v1",
+      model: "m",
+      resolveImage: () => ({ type: "image", url: "media:b" }),
+    });
+    await expect(toURL.complete({ messages: [{ role: "user", content }] }, { signal })).rejects.toThrow(
+      'Image "media:b" cannot be sent as a URL; make resolveImage return { data, mimeType } or an http(s) URL',
+    );
   });
 
   it("numbers missing call ids by round and tells the model which results are errors", async () => {

@@ -112,7 +112,7 @@ These are enforced by tests (`test/architecture.test.ts`), not only by conventio
 
 ```ts
 import { createGraph, diffTraces, toJSONL } from "taugraph";
-import { CodeNode, LLMNode, type LLMModel } from "taugraph/nodes";
+import { CodeNode, LLMNode, type LLMModel, textOf } from "taugraph/nodes";
 import { z } from "zod";
 
 const State = z.object({
@@ -122,7 +122,10 @@ const State = z.object({
 });
 
 // Any provider fits this contract. See examples/adapters/openai-compatible.ts.
-const model: LLMModel = { id: "mock:echo", complete: (req) => ({ content: `echo: ${req.messages.at(-1)?.content}` }) };
+const model: LLMModel = {
+  id: "mock:echo",
+  complete: (req) => ({ content: `echo: ${textOf(req.messages.at(-1)?.content ?? "")}` }),
+};
 
 const graph = createGraph(State, {
   start: "fetch",
@@ -246,7 +249,7 @@ Every failure is a `TaugraphError` with a `code` (`INVALID_GRAPH`, `INVALID_STAT
 | `LLMNode`   | Calls an `LLMModel` (tools included), records an `llm_call` event, optionally parses JSON output with a schema. |
 | `HumanNode` | Pauses for an answer via `ctx.interrupt`, validates it with a schema, asks again if invalid.                    |
 
-`LLMNode` only defines the call contract (`{ id, complete(request, { signal }) }`); bring OpenAI, Ollama or anything else through a small adapter. A small OpenAI-compatible one is in [`examples/adapters`](./examples/adapters/openai-compatible.ts). Messages can carry images; see [Images](#images).
+`LLMNode` only defines the call contract (`{ id, complete(request, { signal }) }`); bring OpenAI, Ollama or anything else through a small adapter. An OpenAI-compatible one is in [`examples/adapters`](./examples/adapters/openai-compatible.ts). Messages can carry images; see [Images](#images).
 
 Writing your own node type takes one call to `defineNode`:
 
@@ -332,8 +335,9 @@ const question: ChatMessage = {
 };
 ```
 
-- A URL may be `https:`, `data:` or a reference of your own. The trace stores the state at every step and every request, so a base64 image is stored again and again, while a reference costs a few bytes. Replay reuses the recorded result of every step that sees its recorded state, so a reference that no longer resolves only matters for steps that run again (overridden, or after the state diverges).
+- A URL may be `https:`, `data:` or a reference of your own. The trace stores the state at every step and every request, so a base64 image is stored again and again, while a reference costs a few bytes. In `recorded` replay, a step that sees its recorded state reuses its recorded result, so a reference only has to resolve for steps that run again.
 - Tools return images the same way: `run: () => ({ content: [{ type: "text", text: "the page" }, { type: "image", url: "media:shot1" }] })`.
+- An MCP tool result can be returned as it is when it holds text and image blocks; other blocks, such as audio or resources, fail the run, so convert them first.
 - For adapters, `resolveImages(messages, resolve)` turns `data:` URLs into base64 and every other URL into what `resolve` returns. An adapter that sends text only uses `textOf(m.content)`, which throws on images unless given `{ imagePlaceholder }`, so a model never answers about a picture it did not get.
 - The [OpenAI-compatible adapter](./examples/adapters/openai-compatible.ts) sends http(s) and `data:` URLs as they are and reads the rest with `resolveImage`. OpenAI's tool messages take text only, so it moves tool images into a user message right after them.
 
@@ -341,11 +345,11 @@ const question: ChatMessage = {
 const model = openAICompatible({
   baseURL: "https://api.openai.com/v1",
   model: "gpt-4o-mini",
-  resolveImage: async (url) => ({
-    type: "image",
-    mimeType: "image/png",
-    data: (await readFile(`media/${url.slice("media:".length)}.png`)).toString("base64"),
-  }),
+  resolveImage: async (url) => {
+    const id = /^media:([\w-]+)$/.exec(url)?.[1];
+    if (!id) throw new Error(`Unknown image reference: ${url}`);
+    return { type: "image", mimeType: "image/png", data: (await readFile(`media/${id}.png`)).toString("base64") };
+  },
 });
 ```
 

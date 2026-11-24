@@ -27,11 +27,11 @@ export function textOf(content: MessageContent, options: TextOfOptions = {}): st
 /** Reads an image URL an adapter cannot send as it is, e.g. `media:abc` from your own store. */
 export type ImageResolver = (url: string) => MaybePromise<ImagePart>;
 
-const DATA_URL = /^data:([\w.+-]+\/[\w.+-]+);base64,([A-Za-z0-9+/]*={0,2})$/;
+const DATA_URL = /^data:([\w.+-]+\/[\w.+-]+);base64,([A-Za-z0-9+/]*={0,2})$/i;
 
 const shown = (url: string): string => (url.length > 100 ? `${url.slice(0, 100)}…` : url);
 
-const isURLImage = (part: ContentPart): boolean => part.type === "image" && "url" in part;
+const isURLImage = (part: ContentPart): boolean => part.type === "image" && !("data" in part);
 
 function isImagePart(value: unknown): value is ImagePart {
   if (typeof value !== "object" || value === null) return false;
@@ -52,12 +52,12 @@ function resolveParts(parts: readonly ContentPart[], resolve: ImageResolver | un
   const from = (start: number): MaybePromise<ContentPart[]> => {
     for (let i = start; i < parts.length; i++) {
       const part = parts[i] as ContentPart;
-      if (part.type === "text" || !("url" in part)) {
+      if (part.type === "text" || "data" in part) {
         out.push(part);
         continue;
       }
       const { url } = part;
-      if (url.startsWith("data:")) {
+      if (/^data:/i.test(url)) {
         out.push(fromDataURL(url));
         continue;
       }
@@ -65,7 +65,7 @@ function resolveParts(parts: readonly ContentPart[], resolve: ImageResolver | un
       return andThen(resolve(url), (image) => {
         if (!isImagePart(image))
           throw new TypeError(`resolveImages: the resolver did not return an image for "${shown(url)}"`);
-        out.push(image);
+        out.push(!("data" in image) && /^data:/i.test(image.url) ? fromDataURL(image.url) : image);
         return from(i + 1);
       });
     }
@@ -75,9 +75,10 @@ function resolveParts(parts: readonly ContentPart[], resolve: ImageResolver | un
 }
 
 /**
- * Replaces each image given by URL in user and tool messages: `data:` URLs become base64 images, other URLs become
- * what `resolve` returns (which may be another URL). URLs are read one after another, and the result is synchronous
- * when `resolve` is. Messages without such images are returned as the same objects.
+ * Replaces each image given by URL in user and tool messages: every `data:` URL, including one `resolve` returns,
+ * becomes a base64 image; other URLs become what `resolve` returns (which may be another URL). URLs are read one after
+ * another, and the result is synchronous when `resolve` is. Messages without such images are returned as the same
+ * objects.
  */
 export function resolveImages(messages: readonly ChatMessage[], resolve?: ImageResolver): MaybePromise<ChatMessage[]> {
   const out: ChatMessage[] = [];

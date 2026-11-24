@@ -112,7 +112,7 @@ flowchart LR
 
 ```ts
 import { createGraph, diffTraces, toJSONL } from "taugraph";
-import { CodeNode, LLMNode, type LLMModel } from "taugraph/nodes";
+import { CodeNode, LLMNode, type LLMModel, textOf } from "taugraph/nodes";
 import { z } from "zod";
 
 const State = z.object({
@@ -122,7 +122,10 @@ const State = z.object({
 });
 
 // 任何模型提供方都能适配这个契约，参见 examples/adapters/openai-compatible.ts
-const model: LLMModel = { id: "mock:echo", complete: (req) => ({ content: `echo: ${req.messages.at(-1)?.content}` }) };
+const model: LLMModel = {
+  id: "mock:echo",
+  complete: (req) => ({ content: `echo: ${textOf(req.messages.at(-1)?.content ?? "")}` }),
+};
 
 const graph = createGraph(State, {
   start: "fetch",
@@ -246,7 +249,7 @@ graph.replay(trace, { overrides?, mode?: "recorded" | "live", allowWrites? })
 | `LLMNode`   | 调用 `LLMModel`（含工具调用），记录 `llm_call` 事件，可选用 schema 解析 JSON 结构化输出 |
 | `HumanNode` | 通过 `ctx.interrupt` 暂停等待回答，用 schema 校验，不合法就再问一次                     |
 
-`LLMNode` 只定义调用契约（`{ id, complete(request, { signal }) }`），OpenAI、Ollama 等通过小适配器接入。[`examples/adapters`](./examples/adapters/openai-compatible.ts) 里有一个小的 OpenAI 兼容适配器。消息可以带图片，见[图片](#图片)。
+`LLMNode` 只定义调用契约（`{ id, complete(request, { signal }) }`），OpenAI、Ollama 等通过小适配器接入。[`examples/adapters`](./examples/adapters/openai-compatible.ts) 里有一个 OpenAI 兼容适配器。消息可以带图片，见[图片](#图片)。
 
 自定义节点类型只需要一次 `defineNode`：
 
@@ -332,8 +335,9 @@ const question: ChatMessage = {
 };
 ```
 
-- 地址可以是 `https:`、`data:`，也可以是你自己定的引用。trace 在每一步的状态和每次请求里都会记下整段对话，所以 base64 图片会被反复存储，引用只占几个字节。回放时状态和录制一致的步骤直接复用录制结果，引用失效只影响重新执行的步骤（被覆盖的，或状态分歧之后的）。
+- 地址可以是 `https:`、`data:`，也可以是你自己定的引用。trace 在每一步的状态和每次请求里都会记下整段对话，所以 base64 图片会被反复存储，引用只占几个字节。`recorded` 模式回放时，状态和录制一致的步骤直接复用录制结果，引用只在需要重新执行的步骤里才要能读取。
 - 工具用同样的方式返回图片：`run: () => ({ content: [{ type: "text", text: "the page" }, { type: "image", url: "media:shot1" }] })`。
+- MCP 工具的结果只含文字和图片块时可以原样返回；音频、资源等其他块会让运行失败，要先转换。
 - 写适配器时，`resolveImages(messages, resolve)` 把 `data:` 地址拆成 base64，其他地址换成 `resolve` 的返回值。只能发文字的适配器用 `textOf(m.content)`；遇到图片它会报错，除非传了 `{ imagePlaceholder }`，这样模型不会对一张没收到的图作答。
 - [OpenAI 兼容适配器](./examples/adapters/openai-compatible.ts) 原样发送 http(s) 和 `data:` 地址，其他地址交给 `resolveImage` 读取。OpenAI 的 `tool` 消息只能放文字，所以工具返回的图片会放进紧跟其后的一条 `user` 消息。
 
@@ -341,11 +345,11 @@ const question: ChatMessage = {
 const model = openAICompatible({
   baseURL: "https://api.openai.com/v1",
   model: "gpt-4o-mini",
-  resolveImage: async (url) => ({
-    type: "image",
-    mimeType: "image/png",
-    data: (await readFile(`media/${url.slice("media:".length)}.png`)).toString("base64"),
-  }),
+  resolveImage: async (url) => {
+    const id = /^media:([\w-]+)$/.exec(url)?.[1];
+    if (!id) throw new Error(`Unknown image reference: ${url}`);
+    return { type: "image", mimeType: "image/png", data: (await readFile(`media/${id}.png`)).toString("base64") };
+  },
 });
 ```
 

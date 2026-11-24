@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { type ChatMessage, resolveImages, textOf } from "../src/nodes/index.js";
+import { type ChatMessage, type ContentPart, resolveImages, textOf } from "../src/nodes/index.js";
 
 const png = { type: "image" as const, data: "iVBORw0KGgo=", mimeType: "image/png" };
 
@@ -18,6 +18,12 @@ describe("textOf", () => {
     const content = [{ type: "text" as const, text: "see " }, png];
     expect(() => textOf(content)).toThrow(/has images and this adapter sends text only/);
     expect(textOf(content, { imagePlaceholder: "[image]" })).toBe("see [image]");
+  });
+
+  it("drops images with an empty placeholder", () => {
+    expect(
+      textOf([{ type: "text", text: "see " }, png, { type: "text", text: "this" }], { imagePlaceholder: "" }),
+    ).toBe("see this");
   });
 });
 
@@ -68,6 +74,48 @@ describe("resolveImages", () => {
     const out = resolveImages(plain) as ChatMessage[];
     expect(out[0]).toBe(plain[0]);
     expect(out[1]).toBe(plain[1]);
+  });
+
+  it("decodes a data: URL the resolver returns and keeps an http(s) URL it returns", () => {
+    const one: ChatMessage[] = [{ role: "user", content: [{ type: "image", url: "media:a" }] }];
+    expect(resolveImages(one, () => ({ type: "image", url: "data:image/png;base64,iVBORw0KGgo=" }))).toEqual([
+      { role: "user", content: [{ type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" }] },
+    ]);
+    expect(resolveImages(one, () => ({ type: "image", url: "https://x/a.png" }))).toEqual([
+      { role: "user", content: [{ type: "image", url: "https://x/a.png" }] },
+    ]);
+  });
+
+  it("reads URLs in order, one after another, with an asynchronous resolver", async () => {
+    const events: string[] = [];
+    const two: ChatMessage[] = [
+      {
+        role: "user",
+        content: [
+          { type: "image", url: "media:a" },
+          { type: "image", url: "media:b" },
+        ],
+      },
+    ];
+    await resolveImages(two, async (url) => {
+      events.push(`start:${url}`);
+      await Promise.resolve();
+      events.push(`end:${url}`);
+      return png;
+    });
+    expect(events).toEqual(["start:media:a", "end:media:a", "start:media:b", "end:media:b"]);
+  });
+
+  it("takes a part with both data and url as a base64 image, and decodes DATA: URLs", () => {
+    const both: ContentPart = { type: "image", data: "QUJD", mimeType: "image/png", url: "media:a" };
+    const withBoth: ChatMessage[] = [{ role: "user", content: [both] }];
+    const [first] = resolveImages(withBoth) as [ChatMessage];
+    expect(first).toBe(withBoth[0]);
+    expect((first.content as ContentPart[])[0]).toBe(both);
+    const upper: ChatMessage[] = [
+      { role: "user", content: [{ type: "image", url: "DATA:image/png;base64,iVBORw0KGgo=" }] },
+    ];
+    expect(resolveImages(upper)).toEqual([{ role: "user", content: [png] }]);
   });
 
   it("fails clearly without a resolver, on a bad data: URL, and when the resolver returns no image", () => {
