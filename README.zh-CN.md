@@ -246,7 +246,7 @@ graph.replay(trace, { overrides?, mode?: "recorded" | "live", allowWrites? })
 | `LLMNode`   | 调用 `LLMModel`（含工具调用），记录 `llm_call` 事件，可选用 schema 解析 JSON 结构化输出 |
 | `HumanNode` | 通过 `ctx.interrupt` 暂停等待回答，用 schema 校验，不合法就再问一次                     |
 
-`LLMNode` 只定义调用契约（`{ id, complete(request, { signal }) }`），OpenAI、Ollama 等通过小适配器接入。[`examples/adapters`](./examples/adapters/openai-compatible.ts) 里有一个 40 行的 OpenAI 兼容适配器。
+`LLMNode` 只定义调用契约（`{ id, complete(request, { signal }) }`），OpenAI、Ollama 等通过小适配器接入。[`examples/adapters`](./examples/adapters/openai-compatible.ts) 里有一个 40 行的 OpenAI 兼容适配器。消息可以带图片，见[图片](#图片)。
 
 自定义节点类型只需要一次 `defineNode`：
 
@@ -315,7 +315,39 @@ think ──没有调用，或到了 maxRounds──▶ finish
 - 工具定义沿用 MCP 的字段（`name`、`description`，`inputSchema` 是 JSON Schema）。给了 `inputSchema` 就用它，否则通过 [Standard JSON Schema](https://standardschema.dev/json-schema) 从 `input` 生成（Zod 4、Valibot、ArkType）。
 - 参数不合 schema、工具不存在、参数读不懂、工具抛错，都作为错误结果交回模型，循环继续。
 - `maxRounds`（默认 8）限制模型调用次数；一次回复最多执行 32 个调用。每次工具执行是一条 `tool_call` 事件。
-- 模型接口新增可选的 `tools`、`toolChoice`、`toolCalls`，以及 `tool` 消息（自己转换 `role` 的适配器要补一个 `tool` 分支）；[OpenAI 兼容适配器](./examples/adapters/openai-compatible.ts) 负责转换。`pnpm example:agent` 能把整套跑一遍。
+- 模型接口新增可选的 `tools`、`toolChoice`、`toolCalls`，以及 `tool` 消息（自己转换 `role` 的适配器要补一个 `tool` 分支）；[OpenAI 兼容适配器](./examples/adapters/openai-compatible.ts) 负责转换。`pnpm example:agent` 能把整套跑一遍。工具结果可以带图片（见[图片](#图片)）。
+
+## 图片
+
+用户消息和工具结果可以带图片，这时 `content` 是按顺序排列的片段数组；`system` 和 `assistant` 消息仍然只有文字。
+
+```ts
+const question: ChatMessage = {
+  role: "user",
+  content: [
+    { type: "text", text: "哪一张是小票？" },
+    { type: "image", data: base64, mimeType: "image/png" }, // 图片内容，base64
+    { type: "image", url: "media:9f2c" }, // 或者一个引用，适配器调用模型时再读取
+  ],
+};
+```
+
+- 地址可以是 `https:`、`data:`，也可以是你自己定的引用。trace 会记下每次请求，agent 每轮都会发送整段对话，所以 base64 图片每轮都会再存一份，引用只占几个字节。重放时复用录制的模型调用，引用失效只影响实时执行的步骤。
+- 工具用同样的方式返回图片：`run: () => ({ content: [{ type: "text", text: "the page" }, { type: "image", url: "media:shot1" }] })`。
+- 写适配器时，`resolveImages(messages, resolve)` 把 `data:` 地址拆成 base64，其他地址换成 `resolve` 的返回值。只能发文字的适配器用 `textOf(m.content)`；遇到图片它会报错，除非传了 `{ imagePlaceholder }`，这样模型不会对一张没收到的图作答。
+- [OpenAI 兼容适配器](./examples/adapters/openai-compatible.ts) 原样发送 http(s) 和 `data:` 地址，其他地址交给 `resolveImage` 读取。OpenAI 的 `tool` 消息只能放文字，所以工具返回的图片会放进紧跟其后的一条 `user` 消息。
+
+```ts
+const model = openAICompatible({
+  baseURL: "https://api.openai.com/v1",
+  model: "gpt-4o-mini",
+  resolveImage: async (url) => ({
+    type: "image",
+    mimeType: "image/png",
+    data: (await readFile(`media/${url.slice("media:".length)}.png`)).toString("base64"),
+  }),
+});
+```
 
 ## 集成
 

@@ -45,6 +45,8 @@ Written by nodes through `ctx.trace.append({ type, input?, output?, meta? })`. T
 
 Any other non-empty string is allowed for custom plugins. Prefix it (`myplugin.event`) to avoid collisions.
 
+In `llm_call.input.messages` and in the agent's `tool_call.output.content`, the `content` of user and tool messages is either a string or an array of parts: `{ type: "text", text }`, `{ type: "image", data, mimeType }` (base64) or `{ type: "image", url, mimeType? }`. A base64 image is stored in every `llm_call` that sends it; pass a reference as `url` and let the adapter read it to keep traces small. Replay reuses recorded `llm_call` outputs, so references only have to resolve for steps that run live.
+
 ## Shape of a run
 
 ```

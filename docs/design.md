@@ -63,6 +63,12 @@ The same function recovers a trace that ended mid-run, for example after a crash
 
 Tool calls carry parsed arguments, as in MCP and Anthropic, because a trace of JSON strings inside JSON is hard to read and diff; adapters convert OpenAI's string form and report unreadable arguments in `parseError` instead of guessing.
 
+## Content is a string or parts
+
+User messages and tool results carry `string | ContentPart[]`, the shape OpenAI and Anthropic use, so text and images can alternate. Two additive shapes were considered. An `images` field next to a string `content` keeps old adapters compiling, but those adapters would then drop images without a word, and the order of text and images is lost. A `parts` field next to `content` keeps the order, but stores the text twice and leaves adapters to guess which one wins. The union breaks adapters at compile time instead, which is where the fix is one call: `textOf(m.content)`, which throws on images unless told what to write instead. `system` and `assistant` stay strings, because no provider takes images there in a way worth the extra cases.
+
+Images can be references (`url: "media:abc"`) that the adapter reads at call time with `resolveImages`. The trace records every request, and the agent resends the conversation each round, so base64 inline would be stored once per round; a reference is stored as a few bytes, and replay needs it only for steps that run live, since recorded steps reuse the model's answer.
+
 ## `LLMNode` takes a model contract, not a callback
 
 `LLMNode(async (s) => await client.chat(...))` would hide the call from the trace. `LLMNode({ model, prompt, update })` lets the node record the exact request and response as an `llm_call` event, and lets replay swap `model` without touching prompt logic. The node stays synchronous when the model is, so mock models work in `runSync`.

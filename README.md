@@ -246,7 +246,7 @@ Every failure is a `TaugraphError` with a `code` (`INVALID_GRAPH`, `INVALID_STAT
 | `LLMNode`   | Calls an `LLMModel` (tools included), records an `llm_call` event, optionally parses JSON output with a schema. |
 | `HumanNode` | Pauses for an answer via `ctx.interrupt`, validates it with a schema, asks again if invalid.                    |
 
-`LLMNode` only defines the call contract (`{ id, complete(request, { signal }) }`); bring OpenAI, Ollama or anything else through a small adapter. A 40-line OpenAI-compatible one is in [`examples/adapters`](./examples/adapters/openai-compatible.ts).
+`LLMNode` only defines the call contract (`{ id, complete(request, { signal }) }`); bring OpenAI, Ollama or anything else through a small adapter. A 40-line OpenAI-compatible one is in [`examples/adapters`](./examples/adapters/openai-compatible.ts). Messages can carry images; see [Images](#images).
 
 Writing your own node type takes one call to `defineNode`:
 
@@ -315,7 +315,39 @@ think ──no calls, or maxRounds──▶ finish
 - Tool definitions follow MCP (`name`, `description`, `inputSchema` as JSON Schema). A tool's JSON Schema comes from `inputSchema` if given, else from `input` through [Standard JSON Schema](https://standardschema.dev/json-schema) (Zod 4, Valibot, ArkType).
 - Invalid arguments, unknown tools, unreadable arguments and thrown errors go back to the model as error results; the loop continues.
 - `maxRounds` (default 8) bounds model calls; at most 32 calls run per reply. Each tool run is a `tool_call` event.
-- Models: the call contract gained optional `tools`, `toolChoice` and `toolCalls`, and `tool` messages. An adapter that maps `role` itself needs a `tool` branch. The [OpenAI-compatible adapter](./examples/adapters/openai-compatible.ts) translates them. `pnpm example:agent` runs the whole thing.
+- Models: the call contract gained optional `tools`, `toolChoice` and `toolCalls`, and `tool` messages. An adapter that maps `role` itself needs a `tool` branch. The [OpenAI-compatible adapter](./examples/adapters/openai-compatible.ts) translates them. `pnpm example:agent` runs the whole thing. Tool results may carry images (see [Images](#images)).
+
+## Images
+
+User messages and tool results can carry images. Their `content` is then an array of parts, in order; `system` and `assistant` messages stay text.
+
+```ts
+const question: ChatMessage = {
+  role: "user",
+  content: [
+    { type: "text", text: "Which of these is the receipt?" },
+    { type: "image", data: base64, mimeType: "image/png" }, // the bytes, in base64
+    { type: "image", url: "media:9f2c" }, // or a reference the adapter reads when it calls the model
+  ],
+};
+```
+
+- A URL may be `https:`, `data:` or a reference of your own. The trace records every request and the agent sends the whole conversation each round, so a base64 image is stored again every round, while a reference costs a few bytes. Replay reuses recorded model calls, so a reference that no longer resolves only matters for steps that run live.
+- Tools return images the same way: `run: () => ({ content: [{ type: "text", text: "the page" }, { type: "image", url: "media:shot1" }] })`.
+- For adapters, `resolveImages(messages, resolve)` turns `data:` URLs into base64 and every other URL into what `resolve` returns. An adapter that sends text only uses `textOf(m.content)`, which throws on images unless given `{ imagePlaceholder }`, so a model never answers about a picture it did not get.
+- The [OpenAI-compatible adapter](./examples/adapters/openai-compatible.ts) sends http(s) and `data:` URLs as they are and reads the rest with `resolveImage`. OpenAI's tool messages take text only, so it moves tool images into a user message right after them.
+
+```ts
+const model = openAICompatible({
+  baseURL: "https://api.openai.com/v1",
+  model: "gpt-4o-mini",
+  resolveImage: async (url) => ({
+    type: "image",
+    mimeType: "image/png",
+    data: (await readFile(`media/${url.slice("media:".length)}.png`)).toString("base64"),
+  }),
+});
+```
 
 ## Integrations
 
