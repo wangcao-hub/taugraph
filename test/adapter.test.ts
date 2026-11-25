@@ -189,4 +189,80 @@ describe("OpenAI-compatible adapter", () => {
       { role: "tool", tool_call_id: "b", content: "Error: boom" },
     ]);
   });
+
+  it("asks for a reasoning level, reads what the model thought, and sends its own reasoning back", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      bodies.push(JSON.parse(String(init.body)));
+      return Response.json({
+        choices: [{ message: { content: "好", reasoning_content: "先想想" } }],
+        usage: { prompt_tokens: 1, completion_tokens: 9, completion_tokens_details: { reasoning_tokens: 7 } },
+      });
+    });
+    const signal = new AbortController().signal;
+    const model = openAICompatible({ baseURL: "http://x/v1", model: "m" });
+    const mine = {
+      role: "assistant" as const,
+      content: "a",
+      model: "openai-compatible:m",
+      reasoning: [{ text: "one" }, { text: "", signature: "x", redacted: true }, { text: "two" }],
+    };
+    const theirs = { role: "assistant" as const, content: "b", model: "other", reasoning: [{ text: "secret" }] };
+    const unknown = { role: "assistant" as const, content: "c", reasoning: [{ text: "?" }] };
+    const response = await model.complete(
+      { messages: [{ role: "user", content: "q" }, mine, theirs, unknown], reasoning: "off" },
+      { signal },
+    );
+    expect(bodies[0]?.reasoning_effort).toBe("none");
+    expect(bodies[0]?.messages).toEqual([
+      { role: "user", content: "q" },
+      { role: "assistant", content: "a", reasoning_content: "one\ntwo" },
+      { role: "assistant", content: "b" },
+      { role: "assistant", content: "c" },
+    ]);
+    expect(response.reasoning).toEqual([{ text: "先想想" }]);
+    expect(response.usage).toEqual({ inputTokens: 1, outputTokens: 9, reasoningTokens: 7 });
+    await model.complete({ messages: [{ role: "user", content: "q" }], reasoning: "high" }, { signal });
+    expect(bodies[1]?.reasoning_effort).toBe("high");
+    await model.complete({ messages: [{ role: "user", content: "q" }] }, { signal });
+    expect(bodies[2]).not.toHaveProperty("reasoning_effort");
+    expect(
+      toOpenAIMessages(
+        [
+          {
+            role: "assistant",
+            content: "",
+            toolCalls: [{ id: "c1", name: "t", arguments: {} }],
+            reasoning: [{ text: "r" }],
+            model: "me",
+          },
+        ],
+        "me",
+      ),
+    ).toEqual([{ role: "assistant", content: null, tool_calls: [fn("c1", "t")], reasoning_content: "r" }]);
+  });
+
+  it("takes reasoning parameters for providers with their own switch, and reads the reasoning field", async () => {
+    let body: Record<string, unknown> = {};
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      body = JSON.parse(String(init.body));
+      return Response.json({ choices: [{ message: { content: "好", reasoning: "thinking" } }] });
+    });
+    const signal = new AbortController().signal;
+    const model = openAICompatible({
+      baseURL: "http://x/v1",
+      model: "m",
+      reasoningParams: (level) =>
+        level === "off" ? { thinking: { type: "disabled" } } : { thinking: { type: "enabled" } },
+    });
+    const response = await model.complete({ messages: [{ role: "user", content: "q" }], reasoning: "off" }, { signal });
+    expect(body.thinking).toEqual({ type: "disabled" });
+    expect(body).not.toHaveProperty("reasoning_effort");
+    expect(response.reasoning).toEqual([{ text: "thinking" }]);
+    await model.complete(
+      { messages: [{ role: "user", content: "q" }], reasoning: "off", extra: { thinking: { type: "enabled" } } },
+      { signal },
+    );
+    expect(body.thinking).toEqual({ type: "enabled" }); // extra wins
+  });
 });

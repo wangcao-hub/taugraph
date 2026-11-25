@@ -1,5 +1,5 @@
 // A small adapter from the LLMModel contract to any OpenAI-compatible /chat/completions endpoint:
-// OpenAI, Ollama, vLLM, LM Studio, DeepSeek, ... including tool calling and images.
+// OpenAI, Ollama, vLLM, LM Studio, DeepSeek, ... including tool calling, images and reasoning.
 // It lives in examples on purpose: taugraph ships no provider code.
 import type { MaybePromise } from "../../src/index.js";
 import {
@@ -8,6 +8,7 @@ import {
   type ImageResolver,
   type LLMModel,
   type MessageContent,
+  type ReasoningLevel,
   resolveImages,
   type ToolCall,
   type ToolChoice,
@@ -22,6 +23,8 @@ export interface OpenAICompatibleOptions {
   readonly apiKey?: string;
   /** Reads image URLs OpenAI cannot fetch, e.g. `media:abc` from your store. http(s) and data: URLs go as they are. */
   readonly resolveImage?: ImageResolver;
+  /** Request parameters for a reasoning level, merged before `extra`. Default: `{ reasoning_effort }`, "off" as "none". */
+  readonly reasoningParams?: (level: ReasoningLevel) => Record<string, unknown>;
 }
 
 /** A tool call as OpenAI sends it: arguments are a JSON string. */
@@ -33,8 +36,39 @@ export interface OpenAIToolCall {
 
 interface ChatCompletion {
   model?: string;
-  choices?: { message?: { content?: string | null; tool_calls?: OpenAIToolCall[] }; finish_reason?: string }[];
-  usage?: { prompt_tokens?: number; completion_tokens?: number };
+  choices?: {
+    message?: {
+      content?: string | null;
+      tool_calls?: OpenAIToolCall[];
+      /** DeepSeek, Qwen, Kimi */
+      reasoning_content?: string | null;
+      /** OpenRouter, Ollama */
+      reasoning?: string | null;
+    };
+    finish_reason?: string;
+  }[];
+  usage?: {
+    prompt_tokens?: number;
+    completion_tokens?: number;
+    completion_tokens_details?: { reasoning_tokens?: number };
+  };
+}
+
+const defaultReasoningParams = (level: ReasoningLevel): Record<string, unknown> => ({
+  reasoning_effort: level === "off" ? "none" : level,
+});
+
+/** A model's own reasoning as `reasoning_content`, which DeepSeek V4 requires back in tool loops. Never another model's. */
+function reasoningOf(
+  m: Extract<ChatMessage, { role: "assistant" }>,
+  modelId: string | undefined,
+): Record<string, unknown> {
+  if (modelId === undefined || m.model !== modelId || !m.reasoning?.length) return {};
+  const text = m.reasoning
+    .filter((r) => !r.redacted)
+    .map((r) => r.text)
+    .join("\n");
+  return text === "" ? {} : { reasoning_content: text };
 }
 
 /** URLs OpenAI takes as they are. */
@@ -65,8 +99,9 @@ function toolText(m: Extract<ChatMessage, { role: "tool" }>): string {
 /**
  * taugraph messages in OpenAI's wire format. Images from tool results go into one user message right after the
  * tool messages, since OpenAI's tool messages take text only. Image references must be read first (`resolveImage`).
+ * Pass the adapter's id as `modelId` to send that model's own reasoning back.
  */
-export function toOpenAIMessages(messages: readonly ChatMessage[]): Record<string, unknown>[] {
+export function toOpenAIMessages(messages: readonly ChatMessage[], modelId?: string): Record<string, unknown>[] {
   const out: Record<string, unknown>[] = [];
   let toolImages: Record<string, unknown>[] = [];
   const flush = () => {
@@ -92,6 +127,7 @@ export function toOpenAIMessages(messages: readonly ChatMessage[]): Record<strin
           type: "function",
           function: { name: c.name, arguments: JSON.stringify(c.arguments) },
         })),
+        ...reasoningOf(m, modelId),
       });
     } else if (m.role === "user" && typeof m.content !== "string") {
       out.push({
@@ -99,7 +135,7 @@ export function toOpenAIMessages(messages: readonly ChatMessage[]): Record<strin
         content: m.content.map((p) => (p.type === "text" ? { type: "text", text: p.text } : imageOf(p))),
       });
     } else {
-      out.push({ role: m.role, content: m.content });
+      out.push({ role: m.role, content: m.content, ...(m.role === "assistant" && reasoningOf(m, modelId)) });
     }
   }
   flush();
@@ -147,13 +183,14 @@ export function fromOpenAIToolCalls(calls: readonly OpenAIToolCall[], round = 1)
 
 export function openAICompatible(options: OpenAICompatibleOptions): LLMModel {
   const url = `${options.baseURL.replace(/\/+$/, "")}/chat/completions`;
+  const id = `openai-compatible:${options.model}`;
   const readImage = (image: string): MaybePromise<ImagePart> => {
     if (/^https?:/i.test(image)) return { type: "image", url: image };
     if (!options.resolveImage) throw new TypeError(`Image "${shown(image)}" needs resolveImage to be read`);
     return options.resolveImage(image);
   };
   return {
-    id: `openai-compatible:${options.model}`,
+    id,
     async complete(request, { signal }) {
       const messages = await resolveImages(request.messages, readImage);
       const response = await fetch(url, {
@@ -165,12 +202,13 @@ export function openAICompatible(options: OpenAICompatibleOptions): LLMModel {
         },
         body: JSON.stringify({
           model: options.model,
-          messages: toOpenAIMessages(messages),
+          messages: toOpenAIMessages(messages, id),
           temperature: request.temperature,
           max_tokens: request.maxTokens,
           ...(request.responseFormat === "json" && { response_format: { type: "json_object" } }),
           ...(request.tools?.length && { tools: toOpenAITools(request.tools) }),
           ...(request.toolChoice && { tool_choice: toOpenAIToolChoice(request.toolChoice) }),
+          ...(request.reasoning && (options.reasoningParams ?? defaultReasoningParams)(request.reasoning)),
           ...request.extra,
         }),
       });
@@ -181,11 +219,19 @@ export function openAICompatible(options: OpenAICompatibleOptions): LLMModel {
       const choice = body.choices?.[0];
       const calls = choice?.message?.tool_calls;
       const round = request.messages.filter((m) => m.role === "assistant").length + 1;
+      const message = choice?.message;
+      const thought = message?.reasoning_content || message?.reasoning;
+      const reasoningTokens = body.usage?.completion_tokens_details?.reasoning_tokens;
       return {
-        content: choice?.message?.content ?? "",
+        content: message?.content ?? "",
         ...(body.model && { model: body.model }),
         ...(choice?.finish_reason && { finishReason: choice.finish_reason }),
-        usage: { inputTokens: body.usage?.prompt_tokens ?? 0, outputTokens: body.usage?.completion_tokens ?? 0 },
+        usage: {
+          inputTokens: body.usage?.prompt_tokens ?? 0,
+          outputTokens: body.usage?.completion_tokens ?? 0,
+          ...(reasoningTokens !== undefined && { reasoningTokens }),
+        },
+        ...(thought && { reasoning: [{ text: thought }] }),
         ...(calls?.length && { toolCalls: fromOpenAIToolCalls(calls, round) }),
       };
     },
