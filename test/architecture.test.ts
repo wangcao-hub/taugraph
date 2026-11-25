@@ -40,6 +40,14 @@ describe("architecture", () => {
     }
   });
 
+  it("builds the OpenAI-compatible adapter on the public API only", () => {
+    for (const { file, imports } of sources("src/openai")) {
+      for (const spec of imports) {
+        expect(spec, `${file} imports ${spec}`).toMatch(/^(\.\.\/index\.js|\.\.\/nodes\/index\.js|\.\/[\w-]+\.js)$/);
+      }
+    }
+  });
+
   it("builds plugin nodes on the public API only", () => {
     for (const { file, imports } of sources("src/nodes")) {
       for (const spec of imports) {

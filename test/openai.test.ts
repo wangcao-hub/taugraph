@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fromOpenAIToolCalls, openAICompatible, toOpenAIMessages } from "../examples/adapters/openai-compatible.js";
+import { fromOpenAIToolCalls, openAICompatible, toOpenAIMessages } from "../src/openai/index.js";
 
 afterEach(() => vi.unstubAllGlobals());
 
@@ -298,5 +298,26 @@ describe("OpenAI-compatible adapter", () => {
       );
       expect(response.usage).toStrictEqual({ inputTokens: 1, outputTokens: 2 });
     }
+  });
+
+  it("uses the fetch it is given instead of the global one", async () => {
+    vi.stubGlobal("fetch", async () => {
+      throw new Error("global fetch used");
+    });
+    const urls: string[] = [];
+    const model = openAICompatible({
+      baseURL: "http://x/v1/",
+      model: "m",
+      fetch: async (input) => {
+        urls.push(String(input));
+        return Response.json({ choices: [{ message: { content: "ok" } }] });
+      },
+    });
+    const response = await model.complete(
+      { messages: [{ role: "user", content: "q" }] },
+      { signal: new AbortController().signal },
+    );
+    expect(response.content).toBe("ok");
+    expect(urls).toEqual(["http://x/v1/chat/completions"]);
   });
 });
