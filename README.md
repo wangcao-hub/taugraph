@@ -249,7 +249,7 @@ Every failure is a `TaugraphError` with a `code` (`INVALID_GRAPH`, `INVALID_STAT
 | `LLMNode`   | Calls an `LLMModel` (tools included), records an `llm_call` event, optionally parses JSON output with a schema. |
 | `HumanNode` | Pauses for an answer via `ctx.interrupt`, validates it with a schema, asks again if invalid.                    |
 
-`LLMNode` only defines the call contract (`{ id, complete(request, { signal }) }`); bring OpenAI, Ollama or anything else through a small adapter. [`taugraph/openai`](#openai-compatible-models-taugraphopenai) covers OpenAI-compatible endpoints. Messages can carry images; see [Images](#images).
+`LLMNode` only defines the call contract (`{ id, complete(request, { signal }) }`); bring any other provider through a small adapter. [`taugraph/openai`](#openai-compatible-models-taugraphopenai) covers OpenAI-compatible endpoints. Messages can carry images; see [Images](#images).
 
 Writing your own node type takes one call to `defineNode`:
 
@@ -334,12 +334,17 @@ const model = openAICompatible({
 });
 ```
 
-| Option            | What it does                                                                              |
-| ----------------- | ----------------------------------------------------------------------------------------- |
-| `resolveImage`    | Reads image references such as `media:abc` when a request is sent; see [Images](#images)  |
-| `reasoningParams` | Maps a reasoning level to request parameters; see [Reasoning models](#reasoning-models)   |
-| `sendReasoning`   | `false` stops sending the model's own reasoning back, for endpoints that refuse the field |
-| `fetch`           | Used instead of the global `fetch`, e.g. for a proxy, retries or tests                    |
+| Option            | What it does                                                                                         |
+| ----------------- | ---------------------------------------------------------------------------------------------------- |
+| `baseURL`         | The part before `/chat/completions`, e.g. `https://api.openai.com/v1` or `http://localhost:11434/v1` |
+| `model`           | The model name the endpoint expects                                                                  |
+| `apiKey`          | Optional; sent as a Bearer token                                                                     |
+| `resolveImage`    | Reads image references such as `media:abc` when a request is sent; see [Images](#images)             |
+| `reasoningParams` | Maps a reasoning level to request parameters; see [Reasoning models](#reasoning-models)              |
+| `sendReasoning`   | `false` stops sending the model's own reasoning back, for endpoints that refuse the field            |
+| `fetch`           | Used instead of the global `fetch`, e.g. for a proxy, retries or tests                               |
+
+The model's `id` is `openai-compatible:<model>`. It is recorded in every `llm_call` event, and assistant messages with that `model` count as this model's own when reasoning is sent back.
 
 Any other provider fits the same contract through a small adapter of your own: an `LLMModel` is `{ id, complete(request, { signal }) }`.
 

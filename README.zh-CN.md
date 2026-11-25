@@ -249,7 +249,7 @@ graph.replay(trace, { overrides?, mode?: "recorded" | "live", allowWrites? })
 | `LLMNode`   | 调用 `LLMModel`（含工具调用），记录 `llm_call` 事件，可选用 schema 解析 JSON 结构化输出 |
 | `HumanNode` | 通过 `ctx.interrupt` 暂停等待回答，用 schema 校验，不合法就再问一次                     |
 
-`LLMNode` 只定义调用契约（`{ id, complete(request, { signal }) }`），OpenAI、Ollama 等通过小适配器接入。[`taugraph/openai`](#openai-兼容模型taugraphopenai) 负责对接 OpenAI 兼容接口。消息可以带图片，见[图片](#图片)。
+`LLMNode` 只定义调用契约（`{ id, complete(request, { signal }) }`），其他服务商通过小适配器接入。[`taugraph/openai`](#openai-兼容模型taugraphopenai) 负责对接 OpenAI 兼容接口。消息可以带图片，见[图片](#图片)。
 
 自定义节点类型只需要一次 `defineNode`：
 
@@ -334,12 +334,17 @@ const model = openAICompatible({
 });
 ```
 
-| 选项              | 作用                                                            |
-| ----------------- | --------------------------------------------------------------- |
-| `resolveImage`    | 发请求时读取 `media:abc` 这类图片引用，见[图片](#图片)          |
-| `reasoningParams` | 把思考档位换成请求参数，见[思考型模型](#思考型模型)             |
-| `sendReasoning`   | 设为 `false` 时不再把模型自己的思考发回，用于拒收这个字段的接口 |
-| `fetch`           | 代替全局的 `fetch`，用于代理、重试或测试                        |
+| 选项              | 作用                                                                                            |
+| ----------------- | ----------------------------------------------------------------------------------------------- |
+| `baseURL`         | `/chat/completions` 之前的部分，例如 `https://api.openai.com/v1` 或 `http://localhost:11434/v1` |
+| `model`           | 接口要求的模型名                                                                                |
+| `apiKey`          | 可选，作为 Bearer token 发送                                                                    |
+| `resolveImage`    | 发请求时读取 `media:abc` 这类图片引用，见[图片](#图片)                                          |
+| `reasoningParams` | 把思考档位换成请求参数，见[思考型模型](#思考型模型)                                             |
+| `sendReasoning`   | 设为 `false` 时不再把模型自己的思考发回，用于拒收这个字段的接口                                 |
+| `fetch`           | 代替全局的 `fetch`，用于代理、重试或测试                                                        |
+
+模型的 `id` 是 `openai-compatible:<model>`。它会记进每条 `llm_call` 事件；`model` 等于它的 assistant 消息算作这个模型自己的，回传思考时据此判断。
 
 其他服务商写一个小适配器就能接入同一个契约：`LLMModel` 就是 `{ id, complete(request, { signal }) }`。
 

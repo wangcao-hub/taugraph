@@ -20,18 +20,18 @@ export interface OpenAICompatibleOptions {
   /** e.g. "https://api.openai.com/v1" or "http://localhost:11434/v1" for Ollama */
   readonly baseURL: string;
   readonly model: string;
-  readonly apiKey?: string;
+  readonly apiKey?: string | undefined;
   /** Reads image URLs OpenAI cannot fetch, e.g. `media:abc` from your store. http(s) and data: URLs go as they are. */
-  readonly resolveImage?: ImageResolver;
+  readonly resolveImage?: ImageResolver | undefined;
   /** Request parameters for a reasoning level, merged before `extra`. Default: `{ reasoning_effort }`, "off" as "none". */
-  readonly reasoningParams?: (level: ReasoningLevel) => Record<string, unknown>;
+  readonly reasoningParams?: ((level: ReasoningLevel) => Record<string, unknown>) | undefined;
   /**
    * Send a model's own reasoning back as `reasoning_content`. Default true: DeepSeek V4 and Kimi refuse a tool loop
    * without it. Set false for endpoints that refuse the field in input messages, such as Groq and Cerebras.
    */
-  readonly sendReasoning?: boolean;
+  readonly sendReasoning?: boolean | undefined;
   /** Used instead of the global `fetch`, e.g. for a proxy, retries or tests. */
-  readonly fetch?: typeof fetch;
+  readonly fetch?: typeof fetch | undefined;
 }
 
 /** A tool call as OpenAI sends it: arguments are a JSON string. */
