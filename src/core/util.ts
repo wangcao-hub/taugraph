@@ -27,9 +27,8 @@ const checked = new WeakSet<object>();
  * `undefined` object properties are kept (JSON drops them; `jsonEqual` ignores them).
  *
  * Parts that `freezeJson` made earlier are reused as they are, and so is every part of `base`
- * (also made by `freezeJson`) that equals the part at the same position: consecutive states
- * share whatever did not change, which keeps traces linear in memory. When an equal part of
- * `base` is reused, its key order is the base's.
+ * (also made by `freezeJson`) that equals the part at the same position, with its keys in the same order:
+ * consecutive states share whatever did not change, which keeps traces linear in memory.
  */
 export function freezeJson<T>(value: T, base?: unknown): T {
   return copy(value, "", new Set(), base) as T;
@@ -81,8 +80,10 @@ function copy(value: unknown, path: string, ancestors: Set<object>, base: unknow
       });
     }
     const keys = Object.keys(out);
+    const oldKeys = old ? Object.keys(old) : [];
+    // Same keys in the same order: a reordered object is new state, not the old one.
     result =
-      old && keys.length === Object.keys(old).length && keys.every((k) => Object.hasOwn(old, k) && out[k] === old[k])
+      old && keys.length === oldKeys.length && keys.every((k, i) => k === oldKeys[i] && out[k] === old[k])
         ? old
         : Object.freeze(out);
   }

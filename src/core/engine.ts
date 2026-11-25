@@ -253,7 +253,7 @@ function* runStep<S>(p: StepParams<S>): Effects<StepOutcome<S>> {
     log.append({ type: "enter", nodeId, step, input: state, meta });
     const output = toJson(recorded.output, `Recorded output of node "${nodeId}" is not plain JSON`, nodeId, step);
     const message = `Recorded output of node "${nodeId}" (step ${step}) no longer matches the schema`;
-    const next = yield* validate(graph.schema, output, message, nodeId, step);
+    const next = yield* validate(graph.schema, output, message, nodeId, step, state);
     log.append({ type: "exit", nodeId, step, output: next, meta: { ...meta, durationMs: 0 } });
     return { kind: "exit", state: next };
   }

@@ -205,7 +205,7 @@ run_start → enter → [llm_call | tool_call | ...] → exit → enter → paus
 
 `enter` 携带输入状态，`exit` 携带输出状态，所以事件流同时也是快照序列（兼顾 Pi 的事件流和 LangGraph 的 snapshot）。节点用 `ctx.trace.append` 追加自己的事件，内核事件类型是保留的。
 
-相邻的快照共享没有变化的部分。内存里总是如此；用 `toJSONL`、`createTraceEncoder` 或 `fileStore` 写到磁盘上时也如此。它们写出 v2 格式，每个快照存成相对上一个快照的改动，所以 trace 随变化的多少增长，而不是随状态的大小增长。
+相邻的快照共享没有变化的部分。内存里总是如此；用 `toJSONL`、`createTraceEncoder` 或 `fileStore` 写到磁盘上时也如此。它们写出 v2 格式，每个快照存成相对上一个快照的改动，所以 trace 随变化的多少增长，而不是随状态的大小增长。这一点对往数组末尾追加元素和修改对象的键成立；在长数组开头插入元素，或者调换对象键的顺序，仍然会把那个数组或对象整个重写一遍。
 
 `run(input, { onEvent })` 会在运行继续之前把每个事件交给你的 sink。sink 抛错时运行以 `SINK_FAILED` 停止，保证没有哪一步是在没写日志的情况下执行的。完整格式见 [docs/trace-format.md](./docs/trace-format.md)。
 
@@ -365,7 +365,7 @@ const question: ChatMessage = {
 };
 ```
 
-- 地址可以是 `https:`、`data:`，也可以是你自己定的引用。trace 会记下每一步的状态和每次请求。`toJSONL` 和 `fileStore` 只在 base64 图片进入状态时写一次，在第一次发送它的请求里再写一次；自己写的 sink 如果每个事件写一次 `JSON.stringify(event)`，每一步都会再存一遍。引用无论哪种方式都只占几个字节。`recorded` 模式回放时，状态和录制一致的步骤直接复用录制结果，引用只在需要重新执行的步骤里才要能读取。
+- 地址可以是 `https:`、`data:`，也可以是你自己定的引用。trace 会记下每一步的状态和每次请求。`toJSONL` 和 `fileStore` 会把工具返回的 base64 图片写三次（`tool_call` 的输出、把它加进状态的 `exit` 补丁、下一次请求），把用户发送的图片写两次（进入状态时、第一次发送它的请求里）；自己写的 sink 如果每个事件写一次 `JSON.stringify(event)`，每一步都会再存一遍。引用无论哪种方式都只占几个字节。`recorded` 模式回放时，状态和录制一致的步骤直接复用录制结果，引用只在需要重新执行的步骤里才要能读取。
 - 工具用同样的方式返回图片：`run: () => ({ content: [{ type: "text", text: "the page" }, { type: "image", url: "media:shot1" }] })`。
 - MCP 工具的结果只含文字和图片块时可以原样返回；音频、资源等其他块会让运行失败，要先转换。
 - 写适配器时，`resolveImages(messages, resolve)` 把 `data:` 地址拆成 base64，其他地址换成 `resolve` 的返回值。只能发文字的适配器用 `textOf(m.content)`；遇到图片它会报错，除非传了 `{ imagePlaceholder }`，这样模型不会对一张没收到的图作答。
@@ -433,13 +433,14 @@ for (const run of store.list()) {
 }
 ```
 
-- `list()` 给出五种状态：`running`（有活着的进程持有这个 run 的锁）、`interrupted`（没有结束，也没有进程在写）、`paused`、`completed`、`failed`。
+- 一个图用一个目录：上面的恢复循环会用同一个图恢复目录里所有中断的 run。
+- `list()` 给出五种状态：`running`（有活着的进程持有这个 run 的锁）、`interrupted`（没有结束，也没有进程在写）、`paused`、`completed`、`failed`。它会跳过无法当作 trace 读取的文件；对这些文件，`load` 会抛出 `INVALID_TRACE`。
 - 崩溃可能留下写了一半的最后一行。`load` 会忽略它，接着跑之前存储会把它截掉。对当时正在执行的写操作步骤，`resume` 会抛出 `UNKNOWN_OUTCOME`，不会再跑一遍。
-- `durability` 决定什么时候 `fsync`：`"writes"`（默认）在写操作步骤开始前、暂停时和结束时；`"every"` 每个事件之后；`"none"` 从不。用 `"writes"` 时，断电可能丢掉只读步骤，重跑它们是安全的，但不会让写操作步骤跑两遍。
+- `durability` 决定什么时候 `fsync`：`"writes"`（默认）在写操作步骤开始前、暂停时和结束时；`"every"` 每个事件之后；`"none"` 从不。用 `"writes"` 时，断电可能丢掉只读步骤，重跑它们是安全的，但不会让写操作步骤跑两遍。一个新 run 如果还没走到写操作步骤、暂停或结束，断电可能让它整个丢失。
 - 写入期间每个 run 有一个锁文件，两个进程不能同时追加同一个 run。已经退出的进程留下的锁会被接管。
 - 锁只在同一台机器（同一个 pid 命名空间）的进程之间有效。共享同一个卷的容器看不到彼此的进程，所以不要让两个容器写同一个目录。
 - 同一个线程里的两个存储不能写同一个 run；在 Node 上，跨 worker 线程也是如此。Bun 和 Deno 上锁没法区分 worker 线程，所以在那里一个目录只从一个线程写。用 `worker.terminate()` 停掉的 worker 会一直占着它的锁，直到进程退出。
-- 进程如果死在不巧的时刻，可能留下 `<runId>.lock.takeover`，或者一个空的 `<runId>.lock`（`list()` 会把这个 run 报成 `running`）。报错里写明了是哪个文件；确认没有进程在写这个 run 后删掉它。只有在不支持硬链接的文件系统上才会出现空锁。崩溃还可能留下 `<runId>.lock.<pid>.<random>` 临时文件，它们无害，可以放心删掉。
+- 进程如果死在不巧的时刻，可能留下 `<runId>.lock.takeover`。报错里写明了是哪个文件；确认没有进程在写这个 run 后删掉它。在不支持硬链接的文件系统上，这样的进程或者断电还可能留下一个空的 `<runId>.lock`：`list()` 会把这个 run 报成 `running`，存储会拒绝这个锁，直到它写入后满 10 秒，然后接管它。崩溃还可能留下 `<runId>.lock.<pid>.<random>` 临时文件，它们无害，可以放心删掉。
 - 只用 `node:fs`（Node、Bun、Deno），不引入依赖。run id 只能包含英文字母、数字、`_`、`-` 和 `.`（不能打头），最长 128 个字符。
 
 ## 集成
@@ -453,7 +454,7 @@ for (const run of store.list()) {
 
 ## 内核刻意不做
 
-持久化后端、分布式 worker、并行节点、嵌套子图、内置工具、记忆、向量库、可视化画布、事件路由、触发器和调度器。同一步里的并发调用没问题：在节点里用 `Promise.all`。其中一部分会以独立插件包出现，但都不会进入内核。
+持久化后端、分布式 worker、并行节点、嵌套子图、内置工具、记忆、向量库、可视化画布、事件路由、触发器和调度器。同一步里的并发调用没问题：在节点里用 `Promise.all`。其中一部分会以独立插件包出现，但都不会进入内核。`taugraph/file` 和 `taugraph/agent` 一样，是内核之外的可选入口。
 
 ## 路线图
 

@@ -98,12 +98,19 @@ describe("JSON patch for trace v2", () => {
     ["type change", { a: [1] }, { a: { 0: 1 } }, [{ op: "replace", path: "/a", value: { 0: 1 } }]],
     ["root primitive", "a", "b", [{ op: "replace", path: "", value: "b" }]],
     ["undefined counts as absent", { a: 1, b: undefined }, { a: 1 }, []],
+    [
+      "reordered keys",
+      { n: { a: 1, b: 2, c: 3 } },
+      { n: { b: 2, c: 3, a: 1 } },
+      [{ op: "replace", path: "/n", value: { b: 2, c: 3, a: 1 } }],
+    ],
   ];
 
   for (const [name, from, to, ops] of cases) {
     it(`diffs and applies: ${name}`, () => {
       expect(diffJson(from, to)).toEqual(ops);
       expect(applyPatch(from, diffJson(from, to))).toEqual(JSON.parse(JSON.stringify(to)));
+      expect(JSON.stringify(applyPatch(from, diffJson(from, to)))).toBe(JSON.stringify(to));
     });
   }
 
@@ -183,13 +190,25 @@ describe("JSON patch for trace v2", () => {
     expect(bad({ op: "move", from: "/a", path: "/b" })).toThrow(/patch op move is not supported/);
     expect(bad({ op: "test", path: "/a", value: 1 })).toThrow(/patch op test is not supported/);
     expect(bad({ op: "copy", from: "/a", path: "" })).toThrow(/patch op copy is not supported/);
-    expect(bad({ op: "add", path: "/m/0", value: 2 })).toThrow(/patch path \/m\/0/);
-    expect(bad({ op: "add", path: "/m/1", value: 2 })).toThrow(/patch path \/m\/1/);
+    expect(bad({ op: "add", path: "/m/2", value: 2 })).toThrow(/patch path \/m\/2 does not exist/);
+    expect(bad({ op: "add", path: "/m/x", value: 2 })).toThrow(/patch path \/m\/x does not exist/);
     expect(bad({ op: "replace", path: "/b", value: 2 })).toThrow(/patch path \/b does not exist/);
     expect(bad({ op: "remove", path: "/b" })).toThrow(/patch path \/b does not exist/);
     expect(bad({ op: "remove", path: "/constructor" })).toThrow(/patch path \/constructor does not exist/);
     expect(bad({ op: "replace", path: "/toString", value: 1 })).toThrow(/patch path \/toString does not exist/);
     expect(applyPatch({ m: [1] }, [{ op: "add", path: "/m/-", value: 2 }])).toEqual({ m: [1, 2] });
+  });
+
+  it("inserts at an array index from 0 to the length", () => {
+    const base = freezeJson({ m: [1, 2, 3] });
+    const add = (path: string) => applyPatch(base, [{ op: "add", path, value: 9 }]);
+    expect(add("/m/0")).toEqual({ m: [9, 1, 2, 3] });
+    expect(add("/m/1")).toEqual({ m: [1, 9, 2, 3] });
+    expect(add("/m/3")).toEqual({ m: [1, 2, 3, 9] });
+    expect(add("/m/-")).toEqual({ m: [1, 2, 3, 9] });
+    expect(() => add("/m/4")).toThrow(/patch path \/m\/4 does not exist/);
+    expect(() => add("/m/01")).toThrow(/patch path \/m\/01 does not exist/);
+    expect(base).toEqual({ m: [1, 2, 3] });
   });
 
   it("turns 2000 seeded random values into each other", () => {

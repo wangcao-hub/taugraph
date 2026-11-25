@@ -14,6 +14,12 @@ import {
 
 const plain = (trace: Trace) => JSON.parse(JSON.stringify(trace));
 
+/** Equal events, with keys in the same order down to the payloads. */
+function expectSame(read: Trace, trace: Trace): void {
+  expect(read).toEqual(plain(trace));
+  expect(read.map((e) => JSON.stringify(e))).toEqual(trace.map((e) => JSON.stringify(e)));
+}
+
 function errorOf(read: () => unknown): unknown {
   try {
     read();
@@ -57,7 +63,7 @@ describe("trace format v2", () => {
     const text = toJSONL(trace);
     expect(text.endsWith("\n")).toBe(true);
     expect(text).toContain('"outputPatch"');
-    expect(fromJSONL(text)).toEqual(plain(trace));
+    expectSame(fromJSONL(text), trace);
   });
 
   it("round-trips paused, resumed and replayed runs", async () => {
@@ -66,7 +72,7 @@ describe("trace format v2", () => {
     const done = await graph.resume(paused.trace, "yes");
     const replayed = await graph.replay(done.trace);
     for (const trace of [paused.trace, done.trace, replayed.trace]) {
-      expect(fromJSONL(toJSONL(trace))).toEqual(plain(trace));
+      expectSame(fromJSONL(toJSONL(trace)), trace);
     }
     expect(runStatus(paused.trace)).toBe("paused");
     expect(runStatus(done.trace)).toBe("completed");
@@ -77,7 +83,7 @@ describe("trace format v2", () => {
     const { trace } = agentRun(4, 50);
     const cut = 7;
     const text = `${toJSONL(trace, { from: 0 }).split("\n").slice(0, cut).join("\n")}\n${toJSONL(trace, { from: cut })}`;
-    expect(fromJSONL(text)).toEqual(plain(trace));
+    expectSame(fromJSONL(text), trace);
     expect(toJSONL(trace, { from: trace.length })).toBe("");
     const encoder = createTraceEncoder(trace.slice(0, cut));
     const lines = trace.slice(cut).map((e) => encoder.encode(e));
@@ -89,7 +95,7 @@ describe("trace format v2", () => {
     const v1 = trace.map((e, i) => JSON.stringify(i === 0 ? { ...e, meta: { ...e.meta, version: 1 } } : e)).join("\n");
     const read = fromJSONL(v1);
     expect(read[0]?.meta?.version).toBe(1);
-    expect(read.slice(1)).toEqual(plain(trace).slice(1));
+    expectSame(read.slice(1), trace.slice(1));
   });
 
   it("continues a version 1 trace with full lines, so the file stays version 1", () => {
@@ -101,10 +107,10 @@ describe("trace format v2", () => {
     const encoder = createTraceEncoder(v1.slice(0, cut));
     const lines = v1.slice(cut).map((e) => encoder.encode(e));
     for (const line of lines) expect(line).not.toMatch(/"(input|output)Patch"/);
-    expect(fromJSONL(`${head}\n${lines.join("\n")}\n`)).toEqual(plain(v1));
+    expectSame(fromJSONL(`${head}\n${lines.join("\n")}\n`), v1);
     const chunk = toJSONL(v1, { from: cut });
     expect(chunk).not.toMatch(/"(input|output)Patch"/);
-    expect(fromJSONL(`${head}\n${chunk}`)).toEqual(plain(v1));
+    expectSame(fromJSONL(`${head}\n${chunk}`), v1);
     expect(toJSONL(v1)).toContain('"outputPatch"');
   });
 
@@ -113,7 +119,7 @@ describe("trace format v2", () => {
     const text = toJSONL(trace);
     const torn = text.slice(0, text.length - 15);
     expect(() => fromJSONL(torn)).toThrow(/is not valid JSON/);
-    expect(fromJSONL(torn, { tornTail: "drop" })).toEqual(plain(trace.slice(0, -1)));
+    expectSame(fromJSONL(torn, { tornTail: "drop" }), trace.slice(0, -1));
     const lines = text.split("\n");
     lines[2] = "{broken";
     expect(() => fromJSONL(lines.join("\n"), { tornTail: "drop" })).toThrow(/Line 3/);
@@ -183,7 +189,7 @@ describe("trace format v2", () => {
     });
     const { trace } = await graph.run({ words: { a: 1 } });
     const read = fromJSONL(toJSONL(trace));
-    expect(read).toEqual(plain(trace));
+    expectSame(read, trace);
     const outputs = read.filter((e) => e.type === "exit").map((e) => (e.output as State).words);
     expect(outputs.map((w) => Object.keys(w).sort())).toEqual([
       ["__proto__", "a", "constructor", "toString"],

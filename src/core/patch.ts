@@ -40,14 +40,23 @@ function walk(a: unknown, b: unknown, path: string, ops: PatchOp[]): void {
     return;
   }
   if (isRecord(a) && isRecord(b)) {
-    for (const key of Object.keys(a)) {
-      if (own(a, key) !== undefined && own(b, key) === undefined) {
-        ops.push({ op: "remove", path: `${path}/${escapeKey(key)}` });
-      }
+    // The per-key operations keep the keys that stay in their order and add new ones at the end. If that is not the
+    // order of `b`, replace the object.
+    const before = Object.keys(a).filter((key) => own(a, key) !== undefined);
+    const after = Object.keys(b).filter((key) => own(b, key) !== undefined);
+    const expected = [
+      ...before.filter((key) => own(b, key) !== undefined),
+      ...after.filter((key) => own(a, key) === undefined),
+    ];
+    if (after.length !== expected.length || after.some((key, i) => key !== expected[i])) {
+      ops.push({ op: "replace", path, value: b });
+      return;
     }
-    for (const key of Object.keys(b)) {
+    for (const key of before) {
+      if (own(b, key) === undefined) ops.push({ op: "remove", path: `${path}/${escapeKey(key)}` });
+    }
+    for (const key of after) {
       const next = own(b, key);
-      if (next === undefined) continue;
       const prev = own(a, key);
       if (prev === undefined) ops.push({ op: "add", path: `${path}/${escapeKey(key)}`, value: next });
       else walk(prev, next, `${path}/${escapeKey(key)}`, ops);
@@ -59,7 +68,8 @@ function walk(a: unknown, b: unknown, path: string, ops: PatchOp[]): void {
 
 /**
  * Applies `ops` to `base` without changing it. Parts the operations do not touch keep their identity.
- * Only the subset is accepted: `add` to an array must use `-`, and `replace` / `remove` need the key or index to exist.
+ * Only the subset is accepted: `add` to an array takes `-` (append) or an index from 0 to its length (insert),
+ * and `replace` / `remove` need the key or index to exist.
  */
 export function applyPatch(base: unknown, ops: readonly PatchOp[]): unknown {
   let doc = base;
@@ -81,15 +91,16 @@ function setIn(node: unknown, tokens: readonly string[], i: number, op: PatchOp)
   const last = i === tokens.length - 1;
   if (Array.isArray(node)) {
     const copy = node.slice();
-    if (last && op.op === "add") {
-      if (token !== "-") throw new Error(`patch path ${op.path} must end in "-" to add to an array`);
+    if (last && op.op === "add" && token === "-") {
       copy.push(op.value);
       return copy;
     }
     const at = Number(token);
-    if (!/^(0|[1-9]\d*)$/.test(token) || at >= copy.length) throw new Error(`patch path ${op.path} does not exist`);
+    const end = last && op.op === "add" ? copy.length : copy.length - 1;
+    if (!/^(0|[1-9]\d*)$/.test(token) || at > end) throw new Error(`patch path ${op.path} does not exist`);
     if (last) {
-      if (op.op === "remove") copy.splice(at, 1);
+      if (op.op === "add") copy.splice(at, 0, op.value);
+      else if (op.op === "remove") copy.splice(at, 1);
       else copy[at] = op.value;
       return copy;
     }

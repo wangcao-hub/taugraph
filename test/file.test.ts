@@ -100,7 +100,8 @@ describe("fileStore", () => {
     const store = fileStore(dir);
     expect(store.list()).toMatchObject([{ status: "running" }]);
     const error = await graph.resume(store.load(runId) as Trace, undefined, { onEvent: store.sink }).catch((e) => e);
-    expect(String(error)).toContain(`Run "${runId}" is being written by process ${process.ppid}`);
+    const lock = join(dir, `${runId}.lock`);
+    expect(String(error)).toContain(`Run "${runId}" is being written by process ${process.ppid} (${lock})`);
     writeFileSync(join(dir, `${runId}.lock`), String(DEAD_PID));
     const done = await graph.resume(store.load(runId) as Trace, undefined, { onEvent: store.sink });
     expect(done.status).toBe("completed");
@@ -132,7 +133,7 @@ describe("fileStore", () => {
     const store = fileStore(dir);
     expect(store.list()).toMatchObject([{ runId, status: "running" }]);
     expect(() => store.sink(trace[3] as Trace[number])).toThrow(
-      `Run "${runId}" is being written by process ${process.pid}`,
+      `Run "${runId}" is being written by process ${process.pid} (${lock})`,
     );
     expect(readFileSync(lock, "utf8")).toBe(String(process.pid));
   });
@@ -149,7 +150,7 @@ describe("fileStore", () => {
     const store = fileStore(dir);
     expect(store.list()).toMatchObject([{ runId, status: "running" }]);
     expect(() => store.sink(trace[3] as Trace[number])).toThrow(
-      `Run "${runId}" is being written by process ${process.pid}`,
+      `Run "${runId}" is being written by process ${process.pid} (${lock})`,
     );
     expect(readFileSync(lock, "utf8")).toBe(String(process.pid));
   });
@@ -162,7 +163,7 @@ describe("fileStore", () => {
     const lock = join(dir, `${runId}.lock`);
     const first = fileStore(dir);
     first.sink(trace[3] as Trace[number]);
-    const busy = `Run "${runId}" is being written by process ${process.pid}`;
+    const busy = `Run "${runId}" is being written by process ${process.pid} (${lock})`;
     expect(() => fileStore(dir).sink(trace[4] as Trace[number])).toThrow(busy);
     expect(() => fileStore(relative(process.cwd(), dir)).sink(trace[4] as Trace[number])).toThrow(busy);
     expect(readFileSync(lock, "utf8")).toBe(String(process.pid));
@@ -171,7 +172,7 @@ describe("fileStore", () => {
     expect(existsSync(lock)).toBe(false);
   });
 
-  it("refuses a lock without a process id, lists its run as running, and keeps the lock", async () => {
+  it("refuses a recent lock without a process id, lists its run as running, and keeps the lock", async () => {
     const dir = temp();
     const { trace } = await graph.run({ n: 0 });
     const runId = trace[0]?.runId as string;
@@ -185,6 +186,25 @@ describe("fileStore", () => {
         `Run "${runId}" has a lock file without a process id (${lock}); remove it if no process is writing the run`,
       );
       expect(readFileSync(lock, "utf8")).toBe(content);
+    }
+  });
+
+  it("takes over a lock without a process id that is older than 10 s, as a power cut leaves it", async () => {
+    const dir = temp();
+    const { trace } = await graph.run({ n: 0 });
+    const runId = trace[0]?.runId as string;
+    const lock = join(dir, `${runId}.lock`);
+    const store = fileStore(dir);
+    const old = new Date(Date.now() - 60_000);
+    for (const content of ["", "abc"]) {
+      crashed(dir, trace, 3);
+      writeFileSync(lock, content);
+      utimesSync(lock, old, old);
+      expect(store.list()).toMatchObject([{ runId, status: "interrupted" }]);
+      const done = await graph.resume(store.load(runId) as Trace, undefined, { onEvent: store.sink });
+      expect(done.status).toBe("completed");
+      expect(runStatus(store.load(runId) as Trace)).toBe("completed");
+      expect(existsSync(lock)).toBe(false);
     }
   });
 

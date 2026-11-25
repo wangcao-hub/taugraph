@@ -84,6 +84,12 @@ const started = Date.now() - process.uptime() * 1000;
 const MTIME_STEP = 2000;
 
 /**
+ * Age after which a lock without a process id is stale. A lock is empty for a moment while it is created on a file
+ * system without hard links, and for good if a power cut came before its content reached the disk.
+ */
+const NO_PID_STALE = 10_000;
+
+/**
  * Whether the process that wrote a lock is still writing the run. A lock with this process's id that this thread
  * does not hold is live if it was written since this process started (another thread or store of this process),
  * give or take one FAT mtime step; an older one was left by an earlier process that had the same id (e.g. a
@@ -99,11 +105,21 @@ function isLive(lock: string, pid: number): boolean {
   }
 }
 
-/** Whether a lock keeps its run from being written: a live holder, or no process id, which the sink refuses. */
+/** Whether a lock with this content keeps its run from being written: a live holder, or no process id for under 10 s. */
+function holds(lock: string, content: string): boolean {
+  const pid = pidIn(content);
+  if (pid !== undefined) return isLive(lock, pid);
+  try {
+    return statSync(lock).mtimeMs >= Date.now() - NO_PID_STALE;
+  } catch {
+    return false; // gone
+  }
+}
+
+/** Whether a lock keeps its run from being written. */
 function locked(lock: string): boolean {
   try {
-    const pid = pidIn(readFileSync(lock, "utf8"));
-    return pid === undefined || isLive(lock, pid);
+    return holds(lock, readFileSync(lock, "utf8"));
   } catch {
     return false; // no lock
   }
@@ -153,7 +169,8 @@ const NO_HARD_LINKS = new Set(["ENOTSUP", "EOPNOTSUPP", "EPERM", "ENOSYS"]);
 
 /**
  * Creates the lock with this process's id in one step, so nobody can see it empty. Without hard links it is created
- * and then written, and may be seen empty for a moment: an empty lock is refused, never deleted. False if it exists.
+ * and then written, and may be seen empty for a moment: an empty lock is refused until it is 10 s old. False if it
+ * exists.
  */
 function link(lock: string): boolean {
   const temp = `${lock}.${suffix()}`;
@@ -179,11 +196,11 @@ function link(lock: string): boolean {
 }
 
 /**
- * Removes a stale lock that holds `stale` (process `pid`). One process at a time does this, holding
- * `<lock>.takeover`; it removes the lock only if it still holds that content and is still stale, so a lock another
- * process created after it was judged is kept.
+ * Removes a stale lock that holds `stale`. One process at a time does this, holding `<lock>.takeover`; it removes the
+ * lock only if it still holds that content and is still stale, so a lock another process created after it was judged
+ * is kept.
  */
-function takeOver(runId: string, lock: string, stale: string, pid: number): void {
+function takeOver(runId: string, lock: string, stale: string): void {
   const mutex = `${lock}.takeover`;
   try {
     writeFileSync(mutex, String(process.pid), { flag: "wx" });
@@ -192,7 +209,7 @@ function takeOver(runId: string, lock: string, stale: string, pid: number): void
     throw new Error(`Run "${runId}" is being taken over by another process (remove ${mutex} if none is)`);
   }
   try {
-    if (readIfExists(lock) === stale && !isLive(lock, pid)) unlinkSync(lock);
+    if (readIfExists(lock) === stale && !holds(lock, stale)) unlinkSync(lock);
   } finally {
     unlinkQuietly(mutex);
   }
@@ -258,14 +275,16 @@ export function fileStore(dir: string, options: FileStoreOptions = {}): FileStor
       }
       const content = readIfExists(lock);
       if (content === undefined) continue; // released in the meantime
-      const pid = pidIn(content);
-      if (pid === undefined) {
-        throw new Error(
-          `Run "${runId}" has a lock file without a process id (${lock}); remove it if no process is writing the run`,
-        );
+      if (holds(lock, content)) {
+        const pid = pidIn(content);
+        if (pid === undefined) {
+          throw new Error(
+            `Run "${runId}" has a lock file without a process id (${lock}); remove it if no process is writing the run`,
+          );
+        }
+        throw new Error(`Run "${runId}" is being written by process ${pid} (${lock})`);
       }
-      if (isLive(lock, pid)) throw new Error(`Run "${runId}" is being written by process ${pid}`);
-      takeOver(runId, lock, content, pid);
+      takeOver(runId, lock, content);
     }
     throw new Error(`Run "${runId}" is being written by another process`);
   }

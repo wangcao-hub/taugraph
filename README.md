@@ -205,7 +205,7 @@ run_start → enter → [llm_call | tool_call | ...] → exit → enter → paus
 
 `enter` carries the input state, `exit` the output state, so the stream doubles as a sequence of snapshots. Nodes add their own events with `ctx.trace.append`. Kernel event types are reserved.
 
-Consecutive snapshots share whatever did not change. In memory this always holds; on disk it holds when you write with `toJSONL`, `createTraceEncoder` or `fileStore`. These write format v2, which stores each snapshot as a patch against the one before, so a trace grows with what changed rather than with the size of the state.
+Consecutive snapshots share whatever did not change. In memory this always holds; on disk it holds when you write with `toJSONL`, `createTraceEncoder` or `fileStore`. These write format v2, which stores each snapshot as a patch against the one before, so a trace grows with what changed rather than with the size of the state. That holds for items appended to arrays and for changes to object keys; inserting at the front of a long array or reordering an object's keys still rewrites that array or object.
 
 `run(input, { onEvent })` hands every event to your sink before the run continues. If the sink throws, the run stops with `SINK_FAILED`, so no step runs without being logged. Full spec: [docs/trace-format.md](./docs/trace-format.md).
 
@@ -365,7 +365,7 @@ const question: ChatMessage = {
 };
 ```
 
-- A URL may be `https:`, `data:` or a reference of your own. The trace records the state at every step and every request. `toJSONL` and `fileStore` write a base64 image once when it enters the state and once in the first request that sends it, but a sink of your own that writes `JSON.stringify(event)` for each event repeats it at every step. A reference costs a few bytes either way. In `recorded` replay, a step that sees its recorded state reuses its recorded result, so a reference only has to resolve for steps that run again.
+- A URL may be `https:`, `data:` or a reference of your own. The trace records the state at every step and every request. `toJSONL` and `fileStore` write a base64 image that a tool returns three times (the `tool_call` output, the `exit` patch that adds it to the state, and the next request) and one that the user sends twice (when it enters the state and in the first request that sends it), but a sink of your own that writes `JSON.stringify(event)` for each event repeats it at every step. A reference costs a few bytes either way. In `recorded` replay, a step that sees its recorded state reuses its recorded result, so a reference only has to resolve for steps that run again.
 - Tools return images the same way: `run: () => ({ content: [{ type: "text", text: "the page" }, { type: "image", url: "media:shot1" }] })`.
 - An MCP tool result can be returned as it is when it holds text and image blocks; other blocks, such as audio or resources, fail the run, so convert them first.
 - For adapters, `resolveImages(messages, resolve)` turns `data:` URLs into base64 and every other URL into what `resolve` returns. An adapter that sends text only uses `textOf(m.content)`, which throws on images unless given `{ imagePlaceholder }`, so a model never answers about a picture it did not get.
@@ -433,13 +433,14 @@ for (const run of store.list()) {
 }
 ```
 
-- `list()` reports `running` (a live process holds the run's lock), `interrupted` (no end and nobody writing it), `paused`, `completed` or `failed`.
+- Use one directory per graph: the recovery loop above resumes every interrupted run in the directory with one graph.
+- `list()` reports `running` (a live process holds the run's lock), `interrupted` (no end and nobody writing it), `paused`, `completed` or `failed`. It skips files it cannot read as a trace; `load` throws `INVALID_TRACE` for them.
 - A crash can leave the last line half-written. `load` ignores it, and the store cuts it off before it continues the run. For a write step that was running, `resume` throws `UNKNOWN_OUTCOME` instead of running it again.
-- `durability` decides when to `fsync`: `"writes"` (default) before a write step runs, at a pause and at the end; `"every"` after each event; `"none"` never. With `"writes"`, a power cut can lose read steps, which are safe to run again, but cannot make a write step run twice.
+- `durability` decides when to `fsync`: `"writes"` (default) before a write step runs, at a pause and at the end; `"every"` after each event; `"none"` never. With `"writes"`, a power cut can lose read steps, which are safe to run again, but cannot make a write step run twice. It can also lose a new run entirely if the run has not yet reached a write step, a pause or its end.
 - Each run has a lock file while it is written, so two processes cannot append to the same run. A lock left by a process that died is taken over.
 - The lock works between processes on one machine (one pid namespace). Containers that share a volume cannot see each other's processes, so do not let two of them write the same directory.
 - Two stores in one thread cannot write the same run; on Node this also holds across worker threads. Bun and Deno give the lock no way to tell worker threads apart, so write a directory from one thread there. A worker stopped with `worker.terminate()` keeps its locks until the process exits.
-- A process that dies at the wrong moment can leave `<runId>.lock.takeover` or an empty `<runId>.lock` (which `list()` reports as `running`). The error names the file; remove it if no process is writing the run. Empty locks only happen on file systems without hard links. A crash can also leave `<runId>.lock.<pid>.<random>` temp files, which are harmless and safe to delete.
+- A process that dies at the wrong moment can leave `<runId>.lock.takeover`. The error names the file; remove it if no process is writing the run. On a file system without hard links, such a process or a power cut can also leave an empty `<runId>.lock`: `list()` reports the run as `running` and the store refuses the lock until it is 10 seconds old, then takes it over. A crash can also leave `<runId>.lock.<pid>.<random>` temp files, which are harmless and safe to delete.
 - It uses `node:fs` (Node, Bun, Deno) and adds no dependencies. Run ids may contain ASCII letters, digits, `_`, `-` and `.` (not first), up to 128 characters.
 
 ## Integrations
@@ -453,7 +454,7 @@ Both keep the trace format, so runs recorded through them can be replayed and di
 
 ## Not in the kernel, on purpose
 
-Persistence backends, distributed workers, parallel nodes, nested subgraphs, built-in tools, memory, vector stores, visual editors, event routing, triggers and schedulers. Parallel calls inside one step are fine: use `Promise.all` in a node. Some will arrive as separate plugin packages; none will enter the kernel.
+Persistence backends, distributed workers, parallel nodes, nested subgraphs, built-in tools, memory, vector stores, visual editors, event routing, triggers and schedulers. Parallel calls inside one step are fine: use `Promise.all` in a node. Some will arrive as separate plugin packages; none will enter the kernel. `taugraph/file` is an optional entry point outside the kernel, like `taugraph/agent`.
 
 ## Roadmap
 

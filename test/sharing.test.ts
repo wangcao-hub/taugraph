@@ -3,7 +3,15 @@ import { z } from "zod";
 import type { AgentState } from "../src/agent/index.js";
 import { createAgent, tool } from "../src/agent/index.js";
 import { freezeJson } from "../src/core/util.js";
-import { createGraph, TaugraphError, type TraceEvent } from "../src/index.js";
+import {
+  createGraph,
+  fromJSONL,
+  type StandardSchemaV1,
+  TaugraphError,
+  type Trace,
+  type TraceEvent,
+  toJSONL,
+} from "../src/index.js";
 
 const enters = (trace: readonly TraceEvent[], nodeId: string) =>
   trace.filter((e) => e.type === "enter" && e.nodeId === nodeId).map((e) => e.input);
@@ -27,6 +35,43 @@ describe("structural sharing", () => {
     expect(inputs[2]?.items[0]).toBe(inputs[1]?.items[0]);
     expect(inputs[2]?.items[1]).toBe(inputs[1]?.items[1]);
     expect(Object.isFrozen(inputs[2]?.items[1])).toBe(true);
+  });
+
+  it("shares unchanged parts of the state in a recorded replay", async () => {
+    const schema = z.object({ items: z.array(z.object({ n: z.number() })) });
+    const add = (s: z.infer<typeof schema>) => ({ items: [...s.items, { n: s.items.length }] });
+    const graph = createGraph(schema, {
+      start: "a",
+      nodes: { a: add, b: add, c: add },
+      edges: [
+        { from: "a", to: "b" },
+        { from: "b", to: "c" },
+      ],
+      endNodes: ["c"],
+    });
+    const { trace } = await graph.replay(graph.runSync({ items: [{ n: 0 }] }).trace);
+    const enters = trace.filter((e) => e.type === "enter");
+    expect(enters.map((e) => e.meta?.source)).toEqual(["recorded", "recorded", "recorded"]);
+    const inputs = enters.map((e) => e.input as { items: { n: number }[] });
+    expect(inputs[2]?.items[0]).toBe(inputs[1]?.items[0]);
+    expect(inputs[2]?.items[1]).toBe(inputs[1]?.items[1]);
+  });
+
+  it("keeps the key order a node returns, in memory and through JSONL", () => {
+    type State = { readonly a: number; readonly b: number; readonly c: number };
+    const passThrough: StandardSchemaV1<State, State> = {
+      "~standard": { version: 1, vendor: "test", validate: (value) => ({ value: value as State }) },
+    };
+    const graph = createGraph(passThrough, {
+      start: "reorder",
+      nodes: { reorder: (s) => ({ b: s.b, c: s.c, a: s.a }), next: (s) => s },
+      edges: [{ from: "reorder", to: "next" }],
+      endNodes: ["next"],
+    });
+    const { trace } = graph.runSync({ a: 1, b: 2, c: 3 });
+    const keys = (t: Trace) => Object.keys(t.find((e) => e.type === "enter" && e.nodeId === "next")?.input as object);
+    expect(keys(trace)).toEqual(["b", "c", "a"]);
+    expect(keys(fromJSONL(toJSONL(trace)))).toEqual(["b", "c", "a"]);
   });
 
   it("shares conversation messages across agent steps and model calls", () => {

@@ -227,10 +227,11 @@ export function fromJSONL(text: string, options: { readonly tornTail?: "drop" | 
 }
 
 function decodeEvent(raw: Record<string, unknown>, index: number, bases: Bases): TraceEvent {
+  // `input` and `output` go before `meta`, where TraceLog puts them, also when they were written as patches.
   const out: Record<string, unknown> = { ...raw };
+  for (const key of ["input", "output", "meta", PATCH.input, PATCH.output]) delete out[key];
   for (const field of FIELDS) {
     const ops = raw[PATCH[field]];
-    delete out[PATCH[field]];
     const base = bases.get(out as unknown as TraceEvent, field);
     try {
       if (ops !== undefined) {
@@ -245,6 +246,7 @@ function decodeEvent(raw: Record<string, unknown>, index: number, bases: Bases):
       throw new TaugraphError("INVALID_TRACE", `Event ${index}: ${reason}`, { cause });
     }
   }
+  if (Object.hasOwn(raw, "meta")) out.meta = raw.meta;
   return out as unknown as TraceEvent;
 }
 
