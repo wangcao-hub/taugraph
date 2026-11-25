@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-25
+
+Tool calling, images and reasoning models in the model contract, plus two plugin entry points: `taugraph/agent` (the model ↔ tools loop as a graph) and `taugraph/openai` (an adapter for any OpenAI-compatible endpoint).
+
 ### Changed
 
 - **Breaking:** the `content` of `user` and `tool` messages is `string | ContentPart[]`, so they can carry images. Code that builds messages is unaffected; code that reads `content` as a string no longer compiles. An adapter that sends text only replaces `m.content` with `textOf(m.content)`, which throws on images unless given `{ imagePlaceholder }`. Template strings, `+` and `String()` still compile but turn parts into `[object Object]`, and JavaScript adapters get no compile error, so search for reads of `content` too.
@@ -52,6 +56,7 @@ GitHub only, not published to npm.
 - Plugin nodes (`taugraph/nodes`): `CodeNode`, `LLMNode` with a provider-agnostic `LLMModel` contract and structured output.
 - Examples: quick start, retrieval with retry loop, OpenAI-compatible adapter.
 
-[Unreleased]: https://github.com/wangcao-hub/taugraph/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/wangcao-hub/taugraph/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/wangcao-hub/taugraph/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/wangcao-hub/taugraph/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/wangcao-hub/taugraph/releases/tag/v0.1.0
