@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { AGENT_DEFAULTS, agentStateSchema, createAgent, tool } from "../src/agent/index.js";
+import { AGENT_DEFAULTS, type AgentState, agentStateSchema, createAgent, tool } from "../src/agent/index.js";
 import { isTaugraphError, type Trace } from "../src/index.js";
 import type { LLMModel, LLMRequest, LLMResponse } from "../src/nodes/index.js";
 
@@ -58,9 +58,9 @@ describe("createAgent", () => {
     expect(state.final).toBe("南京晴");
     expect(state.messages).toEqual([
       { role: "user", content: "南京天气" },
-      { role: "assistant", content: "", toolCalls: [call("c1", "weather", { city: "南京" })] },
+      { role: "assistant", content: "", toolCalls: [call("c1", "weather", { city: "南京" })], model: "mock:agent" },
       { role: "tool", toolCallId: "c1", content: "南京: 晴，-2~5°C" },
-      { role: "assistant", content: "南京晴" },
+      { role: "assistant", content: "南京晴", model: "mock:agent" },
     ]);
     const event = trace.find((e) => e.type === "tool_call");
     expect(event).toMatchObject({
@@ -305,6 +305,49 @@ describe("createAgent", () => {
       createAgent({ model: scripted([{ content: "", toolCalls: [call("c1", "odd")] }]), tools: [odd] }).run(ask("x")),
     ).rejects.toThrow(/Tool "odd" returned neither a string nor \{ content: string \| ContentPart\[\] \}/);
   });
+
+  it("asks for the reasoning level and keeps what the model thought, with signatures, for the next round", async () => {
+    const thought = [{ text: "need the weather first", signature: "sig-1" }];
+    const signed = { ...call("c1", "weather", { city: "南京" }), signature: "ts-1" };
+    const model = scripted([
+      { content: "", reasoning: thought, toolCalls: [signed] },
+      { content: "南京晴", reasoning: [] },
+    ]);
+    const { state } = await createAgent({ model, tools: [weather], reasoning: "high" }).run(ask("南京天气"));
+    expect(model.requests.map((r) => r.reasoning)).toEqual(["high", "high"]);
+    const first = { role: "assistant", content: "", toolCalls: [signed], reasoning: thought, model: "mock:agent" };
+    expect(state.messages[1]).toEqual(first);
+    expect(model.requests[1]?.messages[1]).toEqual(first);
+    expect(state.messages[3]).toEqual({ role: "assistant", content: "南京晴", model: "mock:agent" });
+    const plain = scripted([{ content: "hi" }]);
+    await createAgent({ model: plain }).run(ask("x"));
+    expect(plain.requests[0]).not.toHaveProperty("reasoning");
+  });
+
+  it("records which model wrote each message, so a replay with another model can leave old signatures out", async () => {
+    const a = scripted([
+      {
+        content: "",
+        reasoning: [{ text: "t", signature: "sig-a" }],
+        toolCalls: [call("c1", "weather", { city: "南京" })],
+      },
+      { content: "晴" },
+    ]);
+    const { trace } = await createAgent({ model: a, tools: [weather] }).run(ask("南京天气"));
+    const b = { ...scripted([{ content: "雨" }]), id: "mock:other" };
+    const rainy = (s: AgentState): AgentState => ({
+      ...s,
+      messages: [...s.messages, { role: "tool", toolCallId: "c1", content: "南京: 雨" }],
+      pending: [],
+    });
+    const replayed = await createAgent({ model: b, tools: [weather] }).replay(trace, { overrides: { act: rainy } });
+    expect(b.requests[0]?.messages[1]).toMatchObject({
+      role: "assistant",
+      model: "mock:agent",
+      reasoning: [{ text: "t", signature: "sig-a" }],
+    });
+    expect(replayed.state.messages.at(-1)).toEqual({ role: "assistant", content: "雨", model: "mock:other" });
+  });
 });
 
 describe("agentStateSchema", () => {
@@ -352,6 +395,32 @@ describe("agentStateSchema", () => {
       [["messages", 0, "content", 3, "type"], 'expected "text" or "image"'],
       [["messages", 1, "content"], "expected a string"],
       [["messages", 2, "content"], "expected a string or an array of content parts"],
+    ]);
+  });
+
+  it("checks reasoning, the writing model and signatures", () => {
+    const bad = agentStateSchema["~standard"].validate({
+      messages: [
+        {
+          role: "assistant",
+          content: "",
+          toolCalls: [{ id: "c1", name: "t", arguments: {}, signature: 3 }],
+          model: 1,
+          reasoning: [{ text: 1 }, { text: "", signature: 2, redacted: "yes" }, null],
+        },
+        { role: "assistant", content: "", reasoning: "thought" },
+      ],
+      pending: [{ id: "c1", name: "t", arguments: {}, signature: false }],
+    });
+    expect("issues" in bad && bad.issues?.map((i) => [i.path, i.message])).toEqual([
+      [["messages", 0, "toolCalls", 0, "signature"], "expected a string"],
+      [["messages", 0, "model"], "expected a string"],
+      [["messages", 0, "reasoning", 0, "text"], "expected a string"],
+      [["messages", 0, "reasoning", 1, "signature"], "expected a string"],
+      [["messages", 0, "reasoning", 1, "redacted"], "expected a boolean"],
+      [["messages", 0, "reasoning", 2], "expected a reasoning part object"],
+      [["messages", 1, "reasoning"], "expected an array"],
+      [["pending", 0, "signature"], "expected a string"],
     ]);
   });
 });

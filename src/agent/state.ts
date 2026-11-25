@@ -40,6 +40,8 @@ function checkCall(value: unknown, path: Path, issues: Issue[]): void {
   if (!isObject(value.arguments)) issues.push({ message: "expected an object", path: [...path, "arguments"] });
   if (value.parseError !== undefined && typeof value.parseError !== "string")
     issues.push({ message: "expected a string", path: [...path, "parseError"] });
+  if (value.signature !== undefined && typeof value.signature !== "string")
+    issues.push({ message: "expected a string", path: [...path, "signature"] });
 }
 
 function checkPart(value: unknown, path: Path, issues: Issue[]): void {
@@ -76,6 +78,18 @@ export function checkContent(value: unknown, path: Path, issues: Issue[], parts:
   for (const [i, part] of value.entries()) checkPart(part, [...path, i], issues);
 }
 
+function checkReasoning(value: unknown, path: Path, issues: Issue[]): void {
+  if (!isObject(value)) {
+    issues.push({ message: "expected a reasoning part object", path });
+    return;
+  }
+  if (typeof value.text !== "string") issues.push({ message: "expected a string", path: [...path, "text"] });
+  if (value.signature !== undefined && typeof value.signature !== "string")
+    issues.push({ message: "expected a string", path: [...path, "signature"] });
+  if (value.redacted !== undefined && typeof value.redacted !== "boolean")
+    issues.push({ message: "expected a boolean", path: [...path, "redacted"] });
+}
+
 function checkMessage(value: unknown, path: Path, issues: Issue[]): void {
   if (!isObject(value)) {
     issues.push({ message: "expected a message object", path });
@@ -90,6 +104,14 @@ function checkMessage(value: unknown, path: Path, issues: Issue[]): void {
   if (role === "assistant" && value.toolCalls !== undefined) {
     if (!Array.isArray(value.toolCalls)) issues.push({ message: "expected an array", path: [...path, "toolCalls"] });
     else for (const [i, c] of value.toolCalls.entries()) checkCall(c, [...path, "toolCalls", i], issues);
+  }
+  if (role === "assistant") {
+    if (value.model !== undefined && typeof value.model !== "string")
+      issues.push({ message: "expected a string", path: [...path, "model"] });
+    if (value.reasoning !== undefined) {
+      if (!Array.isArray(value.reasoning)) issues.push({ message: "expected an array", path: [...path, "reasoning"] });
+      else for (const [i, r] of value.reasoning.entries()) checkReasoning(r, [...path, "reasoning", i], issues);
+    }
   }
   if (role === "tool") {
     if (typeof value.toolCallId !== "string")

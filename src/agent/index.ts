@@ -19,6 +19,7 @@ import {
   type LLMModel,
   LLMNode,
   type MessageContent,
+  type ReasoningLevel,
   type ToolCall,
   type ToolChoice,
   type ToolSpec,
@@ -78,6 +79,8 @@ export interface AgentConfig {
   readonly toolChoice?: ToolChoice;
   readonly temperature?: number;
   readonly maxTokens?: number;
+  /** How much the model should think before each answer. Unset: the model's default. */
+  readonly reasoning?: ReasoningLevel;
   /** Retries a failed model call. */
   readonly retry?: RetryPolicy;
   /**
@@ -187,6 +190,7 @@ export function createAgent(config: AgentConfig): AgentGraph {
       ...(config.toolChoice && { toolChoice: config.toolChoice }),
       ...(config.temperature !== undefined && { temperature: config.temperature }),
       ...(config.maxTokens !== undefined && { maxTokens: config.maxTokens }),
+      ...(config.reasoning && { reasoning: config.reasoning }),
     }),
     update: (s, text, response) => {
       const round = s.rounds + 1;
@@ -196,6 +200,8 @@ export function createAgent(config: AgentConfig): AgentGraph {
         role: "assistant",
         content: text,
         ...(calls.length > 0 && { toolCalls: calls }),
+        ...(response.reasoning?.length && { reasoning: response.reasoning }),
+        model: config.model.id, // signatures are only valid for the model that wrote them
       };
       return {
         ...s,
