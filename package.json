@@ -45,6 +45,10 @@
       "types": "./dist/openai/index.d.ts",
       "import": "./dist/openai/index.js"
     },
+    "./file": {
+      "types": "./dist/file/index.d.ts",
+      "import": "./dist/file/index.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [

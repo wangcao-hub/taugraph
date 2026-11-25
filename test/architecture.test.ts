@@ -55,4 +55,22 @@ describe("architecture", () => {
       }
     }
   });
+
+  it("keeps node: modules and Node globals inside taugraph/file", () => {
+    for (const { file, imports } of sources("src")) {
+      const inFile = file.startsWith(join("src", "file"));
+      for (const spec of imports) {
+        if (spec.startsWith("node:")) expect(inFile, `${file} imports ${spec}`).toBe(true);
+      }
+      if (!inFile) {
+        const text = readFileSync(join(root, file), "utf8");
+        expect(text, `${file} mentions process or Buffer`).not.toMatch(/\b(process|Buffer)\b/);
+      }
+    }
+    for (const { file, imports } of sources("src/file")) {
+      for (const spec of imports) {
+        expect(spec, `${file} imports ${spec}`).toMatch(/^(\.\.\/index\.js|node:(fs|path)|\.\/[\w-]+\.js)$/);
+      }
+    }
+  });
 });

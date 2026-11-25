@@ -60,7 +60,7 @@ export interface RunContext {
     /** 1-based attempt number when the node has a retry policy. */
     readonly attempt: number;
     /**
-     * True when this step was already running when the trace ended (e.g. the process crashed)
+     * True when this step was already running when the trace ended (e.g. after a crash)
      * and `resume` started it again. A write node should check whether its effect already happened.
      */
     readonly recovered: boolean;
