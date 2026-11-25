@@ -47,6 +47,8 @@ Any other non-empty string is allowed for custom plugins. Prefix it (`myplugin.e
 
 In `llm_call.input.messages` (the `content` of user and tool messages) and in the agent's `tool_call.output.content`, content is either a string or an array of parts: `{ type: "text", text }`, `{ type: "image", data, mimeType }` (base64) or `{ type: "image", url, mimeType? }`. A base64 image is stored again in every step's state and every `llm_call` that sends it; pass a reference as `url` and let the adapter read it to keep traces small. In `recorded` mode, replay reuses a step's recorded `exit` state when the step sees its recorded input, so references only have to resolve for steps that run again (`source` `live` or `override`).
 
+`llm_call.output.reasoning` holds what the model thought (`{ text, signature?, redacted? }[]`) and `llm_call.output.usage.reasoningTokens` its token count. Assistant messages may carry `reasoning` and `model`, the `LLMModel.id` that wrote them; tool calls may carry `signature`. Adapters send signatures back only to the model named in `model`.
+
 ## Shape of a run
 
 ```

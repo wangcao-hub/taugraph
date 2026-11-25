@@ -69,6 +69,12 @@ User messages and tool results carry `string | ContentPart[]`, the shape OpenAI 
 
 Images can be references (`url: "media:abc"`) that the adapter reads at call time with `resolveImages`. The trace stores the state at every step and every request, and the conversation is part of both, so a base64 image is stored again and again, while a reference is stored as a few bytes. In `recorded` replay, a step that sees its recorded state reuses its recorded result, so a reference only has to resolve for steps that run again.
 
+## Reasoning: levels, and signatures per model
+
+`reasoning` is one of seven levels, not a token budget. OpenAI-style providers take levels and refuse budgets, Claude and Gemini 2.5 take budgets, and a level carries over between them when an adapter maps it, while a budget does not. A request then reads the same in the trace whichever model serves it; a precise budget is still possible through `extra`.
+
+Thinking comes back as readable text with an optional opaque `signature`, not as provider data, so traces stay readable. Signatures are bound to the model that made them, and replay can swap the model, so every assistant message the agent writes records `model` and adapters send signatures only to that model.
+
 ## `LLMNode` takes a model contract, not a callback
 
 `LLMNode(async (s) => await client.chat(...))` would hide the call from the trace. `LLMNode({ model, prompt, update })` lets the node record the exact request and response as an `llm_call` event, and lets replay swap `model` without touching prompt logic. The node stays synchronous when the model is, so mock models work in `runSync`.

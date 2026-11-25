@@ -17,6 +17,7 @@ All notable changes to this project are documented here. The format follows [Kee
 - Images in messages: `TextPart`, `ImagePart` (base64 `data` + `mimeType`, or a `url` that may be a reference of your own) and `ContentPart` in `taugraph/nodes`. `resolveImages(messages, resolve)` reads references when a request is sent, so traces can keep a few bytes per image; `textOf(content)` gives the text for text-only adapters.
 - Agent tools can return text and images (`{ content: ContentPart[] }`); the state schema checks parts and points at the bad one.
 - The OpenAI-compatible example adapter sends images, takes `resolveImage`, and moves images from tool results into a user message after them.
+- Reasoning models: `reasoning` on `LLMRequest` (seven levels, `"off"` to `"max"`), what the model thought in `LLMResponse.reasoning` and `usage.reasoningTokens`, `ToolCall.signature`, and `reasoning` and `model` on assistant messages, so a tool loop can send a model's own thinking back as DeepSeek V4, Claude and Gemini 3 require. `createAgent({ reasoning })` sets the level for every call and records which model wrote each message. The OpenAI-compatible example adapter sends `reasoning_effort` or your `reasoningParams`, reads `reasoning_content` and `reasoning`, and sends its own reasoning back.
 
 ## [0.2.0] - 2026-11-19
 
