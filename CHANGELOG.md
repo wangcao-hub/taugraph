@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-25
+
+Traces grow linearly instead of with the square of the run, in memory and in JSONL (format version 2), and `taugraph/file` stores them as crash-safe files that a restarted process can continue.
+
 ### Changed
 
 - **Breaking:** trace format version 2: `toJSONL` writes each `input` / `output` as a JSON Patch against a base value when the patch is under 4096 characters or not longer than the value, so traces grow with what changed instead of with the square of the run. That holds for items appended to arrays and for changes to object keys; inserting at the front of a long array or reordering an object's keys still rewrites that array or object. `fromJSONL`, `resume` and `replay` read versions 1 and 2. In memory, events keep their shape, and consecutive states share the parts that did not change. taugraph 0.3 and older reject version 2 files. Code that parses `toJSONL` or `fileStore` lines itself now meets `inputPatch` / `outputPatch` instead of `input` / `output`, so read them with `fromJSONL` from 0.4. Custom sinks now see `run_start.meta.version` 2, which taugraph 0.3 rejects, so even files they write in full no longer load there.
@@ -68,7 +72,8 @@ GitHub only, not published to npm.
 - Plugin nodes (`taugraph/nodes`): `CodeNode`, `LLMNode` with a provider-agnostic `LLMModel` contract and structured output.
 - Examples: quick start, retrieval with retry loop, OpenAI-compatible adapter.
 
-[Unreleased]: https://github.com/wangcao-hub/taugraph/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/wangcao-hub/taugraph/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/wangcao-hub/taugraph/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/wangcao-hub/taugraph/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/wangcao-hub/taugraph/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/wangcao-hub/taugraph/releases/tag/v0.1.0

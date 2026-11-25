@@ -104,7 +104,7 @@ flowchart LR
 4. A run is a serializable trace. Replay it at any time, with any node or model swapped.
 5. No hidden magic. Side effects are recorded as explicit events, and nodes that change the world declare `effect: "write"` so a replay never repeats them.
 6. Sync first, async optional. `runSync` never touches a Promise; no async runtime is assumed.
-7. Zero runtime dependencies. Works in Node ≥ 22, Bun, Deno and browsers (CI runs Node 22 and 24; Bun was checked by hand for 0.3.0, Deno and Chrome for 0.2.0).
+7. Zero runtime dependencies. Works in Node ≥ 22, Bun, Deno and browsers (CI runs Node 22 and 24; Bun was checked by hand for 0.4.0, Deno and Chrome for 0.2.0).
 
 These are enforced by tests (`test/architecture.test.ts`), not only by convention.
 
