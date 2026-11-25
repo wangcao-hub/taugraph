@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import { existsSync, mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -7,7 +7,12 @@ import { z } from "zod";
 
 vi.mock("node:fs", async (importOriginal) => {
   const real = await importOriginal<typeof import("node:fs")>();
-  return { ...real, fsyncSync: vi.fn(real.fsyncSync), writeSync: vi.fn(real.writeSync) };
+  return {
+    ...real,
+    fsyncSync: vi.fn(real.fsyncSync),
+    linkSync: vi.fn(real.linkSync),
+    writeSync: vi.fn(real.writeSync),
+  };
 });
 
 const { fileStore } = await import("../src/file/index.js");
@@ -72,5 +77,33 @@ describe("fileStore durability", () => {
     const done = await graph.resume(trace as NonNullable<typeof trace>, undefined, { onEvent: store.sink });
     expect(done.status).toBe("completed");
     expect(runStatus(store.load("r") as NonNullable<typeof trace>)).toBe("completed");
+  });
+
+  it("takes the lock without hard links on a file system that has none", async () => {
+    const link = vi.mocked(fs.linkSync);
+    link.mockImplementation(() => {
+      throw Object.assign(new Error("operation not supported"), { code: "ENOTSUP" });
+    });
+    try {
+      const dir = mkdtempSync(join(tmpdir(), "taugraph-durability-"));
+      const store = fileStore(dir);
+      let lock: string | undefined;
+      const done = await graph.run(
+        { n: 0 },
+        {
+          runId: "r",
+          onEvent: (event) => {
+            store.sink(event);
+            if (event.seq === 0) lock = readFileSync(join(dir, "r.lock"), "utf8");
+          },
+        },
+      );
+      expect(link).toHaveBeenCalled();
+      expect(done.status).toBe("completed");
+      expect(lock).toBe(String(process.pid));
+      expect(readdirSync(dir)).toEqual(["r.jsonl"]);
+    } finally {
+      link.mockReset();
+    }
   });
 });

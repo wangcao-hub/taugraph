@@ -1,6 +1,6 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { fileStore } from "../src/file/index.js";
@@ -106,16 +106,69 @@ describe("fileStore", () => {
     expect(done.status).toBe("completed");
   });
 
-  it("takes over a lock with this process's id that this process does not hold", async () => {
+  it("takes over a lock with this process's id written before this process started", async () => {
     const dir = temp();
     const { trace } = await graph.run({ n: 0 });
     const runId = trace[0]?.runId as string;
     crashed(dir, trace, 3);
-    writeFileSync(join(dir, `${runId}.lock`), String(process.pid)); // left by an earlier process with the same pid
+    const lock = join(dir, `${runId}.lock`);
+    writeFileSync(lock, String(process.pid)); // left by an earlier process with the same pid
+    const before = new Date(Date.now() - process.uptime() * 1000 - 60_000);
+    utimesSync(lock, before, before);
     const store = fileStore(dir);
+    expect(store.list()).toMatchObject([{ runId, status: "interrupted" }]);
     const done = await graph.resume(store.load(runId) as Trace, undefined, { onEvent: store.sink });
     expect(done.status).toBe("completed");
-    expect(existsSync(join(dir, `${runId}.lock`))).toBe(false);
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it("refuses a lock with this process's id written since it started: another thread or store may hold it", async () => {
+    const dir = temp();
+    const { trace } = await graph.run({ n: 0 });
+    const runId = trace[0]?.runId as string;
+    crashed(dir, trace, 3);
+    const lock = join(dir, `${runId}.lock`);
+    writeFileSync(lock, String(process.pid));
+    const store = fileStore(dir);
+    expect(store.list()).toMatchObject([{ runId, status: "running" }]);
+    expect(() => store.sink(trace[3] as Trace[number])).toThrow(
+      `Run "${runId}" is being written by process ${process.pid}`,
+    );
+    expect(readFileSync(lock, "utf8")).toBe(String(process.pid));
+  });
+
+  it("refuses a second store of this process while the first writes the run, however the directory is written", async () => {
+    const dir = temp();
+    const { trace } = await graph.run({ n: 0 });
+    const runId = trace[0]?.runId as string;
+    crashed(dir, trace, 3);
+    const lock = join(dir, `${runId}.lock`);
+    const first = fileStore(dir);
+    first.sink(trace[3] as Trace[number]);
+    const busy = `Run "${runId}" is being written by process ${process.pid}`;
+    expect(() => fileStore(dir).sink(trace[4] as Trace[number])).toThrow(busy);
+    expect(() => fileStore(relative(process.cwd(), dir)).sink(trace[4] as Trace[number])).toThrow(busy);
+    expect(readFileSync(lock, "utf8")).toBe(String(process.pid));
+    for (const event of trace.slice(4)) first.sink(event);
+    expect(runStatus(first.load(runId) as Trace)).toBe("completed");
+    expect(existsSync(lock)).toBe(false);
+  });
+
+  it("refuses a lock without a process id, lists its run as running, and keeps the lock", async () => {
+    const dir = temp();
+    const { trace } = await graph.run({ n: 0 });
+    const runId = trace[0]?.runId as string;
+    crashed(dir, trace, 3);
+    const lock = join(dir, `${runId}.lock`);
+    const store = fileStore(dir);
+    for (const content of ["", "abc"]) {
+      writeFileSync(lock, content);
+      expect(store.list()).toMatchObject([{ runId, status: "running" }]);
+      expect(() => store.sink(trace[3] as Trace[number])).toThrow(
+        `Run "${runId}" has a lock file without a process id (${lock}); remove it if no process is writing the run`,
+      );
+      expect(readFileSync(lock, "utf8")).toBe(content);
+    }
   });
 
   it("refuses gaps, duplicate runs and runIds that are not file names", async () => {

@@ -11,13 +11,12 @@ import {
   openSync,
   readdirSync,
   readFileSync,
-  renameSync,
   statSync,
   unlinkSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { createTraceEncoder, fromJSONL, runStatus, type Trace, type TraceEvent } from "../index.js";
 
 /** When to fsync: around write steps, pauses and the end of a run (default), after every event, or never. */
@@ -74,25 +73,35 @@ function pidIn(content: string): number | undefined {
   return /^\d+$/.test(text) && Number(text) > 0 ? Number(text) : undefined;
 }
 
-/** Lock files this process holds; released if the process exits while a run is still open. */
+/** Lock files (absolute paths) this thread holds; released if the process exits while a run is still open. */
 const held = new Set<string>();
 let releaseOnExit = false;
 
+/** When this process started, in ms since epoch. The same in every thread. */
+const started = Date.now() - process.uptime() * 1000;
+
 /**
- * Whether the process that wrote a lock is still writing the run. This process's own id counts only for locks it
- * holds: any other lock with that id was left by an earlier process that had the same id (e.g. a restarted container).
+ * Whether the process that wrote a lock is still writing the run. A lock with this process's id that this thread
+ * does not hold is live if it was written since this process started (another thread or store of this process);
+ * an older one was left by an earlier process that had the same id (e.g. a restarted container).
  */
 function isLive(lock: string, pid: number): boolean {
-  return pid === process.pid ? held.has(lock) : alive(pid);
+  if (pid !== process.pid) return alive(pid);
+  if (held.has(lock)) return true;
+  try {
+    return statSync(lock).mtimeMs >= started;
+  } catch {
+    return false; // gone
+  }
 }
 
-/** The live process holding a lock file, if any. */
-function holder(lock: string): number | undefined {
+/** Whether a lock keeps its run from being written: a live holder, or no process id, which the sink refuses. */
+function locked(lock: string): boolean {
   try {
     const pid = pidIn(readFileSync(lock, "utf8"));
-    return pid !== undefined && isLive(lock, pid) ? pid : undefined;
+    return pid === undefined || isLive(lock, pid);
   } catch {
-    return undefined;
+    return false; // no lock
   }
 }
 
@@ -105,9 +114,9 @@ function hold(lock: string): void {
   });
 }
 
-/** Removes a lock this process took, unless it no longer holds this process's id (another process took it over). */
+/** Removes a lock this thread holds, unless it no longer holds this process's id (another process took it over). */
 function releaseLock(lock: string): void {
-  held.delete(lock);
+  if (!held.delete(lock)) return;
   try {
     if (readFileSync(lock, "utf8") === String(process.pid)) unlinkSync(lock);
   } catch {
@@ -135,45 +144,53 @@ function readIfExists(path: string): string | undefined {
 
 const suffix = () => `${process.pid}.${Math.random().toString(36).slice(2, 10)}`;
 
-/** Creates the lock with this process's id in one step, so nobody can see it empty. False if it already exists. */
+/** What `linkSync` throws on a file system without hard links (FAT, exFAT, some SMB and FUSE mounts). */
+const NO_HARD_LINKS = new Set(["ENOTSUP", "EOPNOTSUPP", "EPERM", "ENOSYS"]);
+
+/**
+ * Creates the lock with this process's id in one step, so nobody can see it empty. Without hard links it is created
+ * and then written, and may be seen empty for a moment: an empty lock is refused, never deleted. False if it exists.
+ */
 function link(lock: string): boolean {
   const temp = `${lock}.${suffix()}`;
   try {
     writeFileSync(temp, String(process.pid), { flag: "wx" });
     try {
       linkSync(temp, lock);
+      return true;
     } catch (error) {
       if (codeOf(error) === "EEXIST") return false;
-      throw error;
+      if (!NO_HARD_LINKS.has(codeOf(error) ?? "")) throw error;
     }
-    return true;
   } finally {
     unlinkQuietly(temp);
+  }
+  try {
+    writeFileSync(lock, String(process.pid), { flag: "wx" });
+    return true;
+  } catch (error) {
+    if (codeOf(error) === "EEXIST") return false;
+    throw error;
   }
 }
 
 /**
- * Removes a stale lock that holds `stale`. It is moved aside first: if another process replaced it after it was
- * judged, the moved file holds that process's lock, which is put back.
+ * Removes a stale lock that holds `stale` (process `pid`). One process at a time does this, holding
+ * `<lock>.takeover`; it removes the lock only if it still holds that content and is still stale, so a lock another
+ * process created after it was judged is kept.
  */
-function takeOver(lock: string, stale: string): void {
-  const moved = `${lock}.stale.${suffix()}`;
+function takeOver(runId: string, lock: string, stale: string, pid: number): void {
+  const mutex = `${lock}.takeover`;
   try {
-    renameSync(lock, moved);
+    writeFileSync(mutex, String(process.pid), { flag: "wx" });
   } catch (error) {
-    if (codeOf(error) === "ENOENT") return; // moved or released by someone else
-    throw error;
+    if (codeOf(error) !== "EEXIST") throw error;
+    throw new Error(`Run "${runId}" is being taken over by another process (remove ${mutex} if none is)`);
   }
   try {
-    if (readFileSync(moved, "utf8") !== stale) {
-      try {
-        linkSync(moved, lock);
-      } catch (error) {
-        if (codeOf(error) !== "EEXIST") throw error;
-      }
-    }
+    if (readIfExists(lock) === stale && !isLive(lock, pid)) unlinkSync(lock);
   } finally {
-    unlinkQuietly(moved);
+    unlinkQuietly(mutex);
   }
 }
 
@@ -193,7 +210,11 @@ const utf8 = new TextEncoder();
 function writeAll(fd: number, text: string): void {
   const bytes = utf8.encode(text);
   let offset = 0;
-  while (offset < bytes.length) offset += writeSync(fd, bytes, offset);
+  while (offset < bytes.length) {
+    const written = writeSync(fd, bytes, offset);
+    if (written === 0) throw new Error("write made no progress");
+    offset += written;
+  }
 }
 
 /** Makes a new file's directory entry durable. Not every system can fsync a directory. */
@@ -221,11 +242,11 @@ export function fileStore(dir: string, options: FileStoreOptions = {}): FileStor
   const durability = options.durability ?? "writes";
   const writing = new Map<string, Writing>();
   const fileOf = (runId: string) => join(dir, `${runId}.jsonl`);
-  const lockOf = (runId: string) => join(dir, `${runId}.lock`);
+  // Absolute, so every store for this directory, however it is written, agrees on which locks this thread holds.
+  const lockOf = (runId: string) => resolve(dir, `${runId}.lock`);
 
   function acquire(runId: string): string {
     const lock = lockOf(runId);
-    let seen: number | undefined;
     for (let attempt = 0; attempt < 3; attempt++) {
       if (link(lock)) {
         hold(lock);
@@ -239,11 +260,10 @@ export function fileStore(dir: string, options: FileStoreOptions = {}): FileStor
           `Run "${runId}" has a lock file without a process id (${lock}); remove it if no process is writing the run`,
         );
       }
-      seen = pid;
       if (isLive(lock, pid)) throw new Error(`Run "${runId}" is being written by process ${pid}`);
-      takeOver(lock, content);
+      takeOver(runId, lock, content, pid);
     }
-    throw new Error(`Run "${runId}" is being written by ${seen === undefined ? "another process" : `process ${seen}`}`);
+    throw new Error(`Run "${runId}" is being written by another process`);
   }
 
   function release(runId: string, w: Writing): void {
@@ -296,9 +316,10 @@ export function fileStore(dir: string, options: FileStoreOptions = {}): FileStor
     } catch (error) {
       try {
         if (fd !== undefined) closeSync(fd);
-      } finally {
-        releaseLock(lock);
+      } catch {
+        // keep the original error
       }
+      releaseLock(lock);
       throw error;
     }
   }
@@ -322,7 +343,11 @@ export function fileStore(dir: string, options: FileStoreOptions = {}): FileStor
     } catch (error) {
       // ENOSPC, EIO: the run ends here and the kernel will not send its run_end. Free the run, so a resume opens the
       // file again and cuts what was half written.
-      release(event.runId, w);
+      try {
+        release(event.runId, w);
+      } catch {
+        // keep the original error
+      }
       throw error;
     }
     if (event.type === "run_end") release(event.runId, w);
@@ -348,7 +373,7 @@ export function fileStore(dir: string, options: FileStoreOptions = {}): FileStor
             if (!trace) return [];
             const status = runStatus(trace);
             const stored: StoredRunStatus =
-              status !== "running" ? status : holder(lockOf(runId)) !== undefined ? "running" : "interrupted";
+              status !== "running" ? status : locked(lockOf(runId)) ? "running" : "interrupted";
             return [{ runId, status: stored, events: trace.length, updatedAt: statSync(path).mtimeMs }];
           } catch {
             return [];
