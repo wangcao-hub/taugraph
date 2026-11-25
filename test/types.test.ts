@@ -3,7 +3,18 @@ import { describe, expectTypeOf, it } from "vitest";
 import { z } from "zod";
 import { type AgentNodeId, type AgentState, createAgent, tool } from "../src/agent/index.js";
 import { createGraph, type MaybePromise, type RunResult } from "../src/index.js";
-import { type ChatMessage, CodeNode, type ImagePart, LLMNode, resolveImages, textOf } from "../src/nodes/index.js";
+import {
+  type ChatMessage,
+  CodeNode,
+  type ImagePart,
+  LLMNode,
+  type LLMRequest,
+  type LLMResponse,
+  type ReasoningLevel,
+  type ReasoningPart,
+  resolveImages,
+  textOf,
+} from "../src/nodes/index.js";
 
 const schema = z.object({
   question: z.string(),
@@ -61,6 +72,25 @@ describe("type inference", () => {
     expectTypeOf(resolveImages).returns.toEqualTypeOf<MaybePromise<ChatMessage[]>>();
     expectTypeOf([user, result, system, assistant]).toEqualTypeOf<ChatMessage[]>();
     void untyped;
+  });
+
+  it("describes reasoning in requests, replies and messages", () => {
+    const parts: ReasoningPart[] = [
+      { text: "hmm", signature: "sig" },
+      { text: "", signature: "enc", redacted: true },
+    ];
+    const request: LLMRequest = { messages: [], reasoning: "max" };
+    const response: LLMResponse = {
+      content: "",
+      reasoning: parts,
+      usage: { outputTokens: 10, reasoningTokens: 7 },
+      toolCalls: [{ id: "c1", name: "t", arguments: {}, signature: "ts" }],
+    };
+    const message: ChatMessage = { role: "assistant", content: "", reasoning: parts, model: "m" };
+    // @ts-expect-error not a reasoning level
+    const wrong: LLMRequest = { messages: [], reasoning: "ultra" };
+    expectTypeOf<ReasoningLevel>().toEqualTypeOf<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max">();
+    void [request, response, message, wrong];
   });
 
   it("infers state, input and node ids from the schema and nodes", () => {

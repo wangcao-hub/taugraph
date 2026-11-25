@@ -20,10 +20,26 @@ export interface ToolCall {
   readonly arguments: Readonly<Record<string, unknown>>;
   /** Set by an adapter that could not read the arguments as a JSON object; `arguments` is then `{}`. */
   readonly parseError?: string;
+  /** The provider's opaque proof for this call (Gemini's thought signature). Send it back to the same model only. */
+  readonly signature?: string;
 }
 
 /** How the model may use tools: freely, not at all, at least one, or this one. */
 export type ToolChoice = "auto" | "none" | "required" | { readonly name: string };
+
+/** How much a model should think before it answers. Adapters map it to the provider's setting, rounding to the nearest level the model has. */
+export type ReasoningLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+
+/**
+ * What a model thought before answering, in the order it gave. `signature` is the provider's opaque proof and is only
+ * valid for the model that wrote it: adapters send it back when the assistant message's `model` is their own `id`.
+ */
+export interface ReasoningPart {
+  readonly text: string;
+  readonly signature?: string;
+  /** The provider hid the text (a safety filter); `signature` holds the encrypted payload. */
+  readonly redacted?: boolean;
+}
 
 /** Text in a message. */
 export interface TextPart {
@@ -50,7 +66,15 @@ export type MessageContent = string | readonly ContentPart[];
 export type ChatMessage =
   | { readonly role: "system"; readonly content: string }
   | { readonly role: "user"; readonly content: MessageContent }
-  | { readonly role: "assistant"; readonly content: string; readonly toolCalls?: readonly ToolCall[] }
+  | {
+      readonly role: "assistant";
+      readonly content: string;
+      readonly toolCalls?: readonly ToolCall[];
+      /** What the model thought first. */
+      readonly reasoning?: readonly ReasoningPart[];
+      /** The `LLMModel.id` that wrote this message; adapters send reasoning signatures back only to the same model. */
+      readonly model?: string;
+    }
   | {
       readonly role: "tool";
       readonly toolCallId: string;
@@ -70,15 +94,24 @@ export interface LLMRequest {
   /** Tools the model may call; adapters translate them to the provider's format. */
   readonly tools?: readonly ToolSpec[];
   readonly toolChoice?: ToolChoice;
+  /** How much the model should think first. Unset: the adapter sends nothing and the model uses its default. */
+  readonly reasoning?: ReasoningLevel;
 }
 
 export interface LLMResponse {
   readonly content: string;
   readonly model?: string;
   readonly finishReason?: string;
-  readonly usage?: { readonly inputTokens?: number; readonly outputTokens?: number };
+  readonly usage?: {
+    readonly inputTokens?: number;
+    readonly outputTokens?: number;
+    /** Tokens spent thinking; already counted in `outputTokens`. */
+    readonly reasoningTokens?: number;
+  };
   /** Tool calls the model asked for, in order. */
   readonly toolCalls?: readonly ToolCall[];
+  /** What the model thought before answering, in order. */
+  readonly reasoning?: readonly ReasoningPart[];
 }
 
 export interface LLMModel {

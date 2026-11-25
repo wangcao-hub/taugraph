@@ -16,6 +16,8 @@ export {
   type LLMStructuredNodeConfig,
   type LLMTextNodeConfig,
   type MessageContent,
+  type ReasoningLevel,
+  type ReasoningPart,
   type TextPart,
   type ToolCall,
   type ToolChoice,
