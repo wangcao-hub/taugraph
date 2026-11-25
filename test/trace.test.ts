@@ -5,6 +5,7 @@ import {
   createGraph,
   fromJSONL,
   TaugraphError,
+  TRACE_VERSION,
   type TraceEvent,
   toJSONL,
   tracePath,
@@ -43,7 +44,7 @@ describe("trace", () => {
     ]);
     expect(trace.map((e) => e.seq)).toEqual([0, 1, 2, 3, 4, 5, 6]);
     expect(trace.every((e) => e.runId === "run-1")).toBe(true);
-    expect(trace[0]?.meta).toMatchObject({ format: "taugraph.trace", version: 1, start: "upper" });
+    expect(trace[0]?.meta).toMatchObject({ format: "taugraph.trace", version: TRACE_VERSION, start: "upper" });
     expect(trace[1]?.input).toEqual({ text: "hi" });
     expect(trace[3]?.output).toEqual({ text: "HI" });
     expect(trace[6]?.output).toEqual({ text: "HI!" });

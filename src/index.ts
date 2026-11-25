@@ -6,12 +6,14 @@ export { isTaugraphError, TaugraphError } from "./core/errors.js";
 export { createGraph } from "./core/graph.js";
 export { defineNode } from "./core/node.js";
 export type { StandardSchemaV1 } from "./core/standard-schema.js";
-export type { RecordedStep, TraceDiff } from "./core/trace.js";
+export type { RecordedStep, RunStatus, TraceDiff } from "./core/trace.js";
 export {
   assertTrace,
+  createTraceEncoder,
   diffTraces,
   fromJSONL,
   recordedSteps,
+  runStatus,
   TRACE_FORMAT,
   TRACE_VERSION,
   toJSONL,

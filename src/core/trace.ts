@@ -1,9 +1,11 @@
 import { TaugraphError } from "./errors.js";
+import { applyPatch, diffJson, type PatchOp } from "./patch.js";
 import type { KernelEventType, Trace, TraceEvent, TraceEventType } from "./types.js";
 import { freezeJson, jsonEqual } from "./util.js";
 
 export const TRACE_FORMAT = "taugraph.trace";
-export const TRACE_VERSION = 1;
+export const TRACE_VERSION = 2;
+const READABLE_VERSIONS: ReadonlySet<unknown> = new Set([1, 2]);
 
 export const KERNEL_EVENT_TYPES: ReadonlySet<string> = new Set<KernelEventType>([
   "run_start",
@@ -105,25 +107,130 @@ function sinkFailed(cause: unknown): TaugraphError {
 // Serialization
 // ---------------------------------------------------------------------------
 
-/** One JSON object per line, the same layout as an append-only log file. */
-export function toJSONL(trace: Trace): string {
-  return trace
-    .map((event) => JSON.stringify(event))
-    .join("\n")
-    .concat("\n");
+type Field = "input" | "output";
+const FIELDS: readonly Field[] = ["input", "output"];
+const PATCH = { input: "inputPatch", output: "outputPatch" } as const;
+const SHORT_PATCH = 4096;
+
+/** Base values for v2 patches, updated event by event in the same way when writing and reading. */
+class Bases {
+  #state: { readonly value: unknown } | undefined;
+  readonly #enters = new Map<number, unknown>();
+  readonly #last = new Map<string, unknown>();
+
+  get(event: TraceEvent, field: Field): { readonly value: unknown } | undefined {
+    if ((event.type === "enter" && field === "input") || (event.type === "run_end" && field === "output")) {
+      return this.#state;
+    }
+    if (event.type === "exit" && field === "output") {
+      return event.step !== undefined && this.#enters.has(event.step)
+        ? { value: this.#enters.get(event.step) }
+        : undefined;
+    }
+    const key = `${event.type}\u0000${event.nodeId ?? ""}\u0000${field}`;
+    return this.#last.has(key) ? { value: this.#last.get(key) } : undefined;
+  }
+
+  update(event: TraceEvent): void {
+    for (const field of FIELDS) {
+      const value = event[field];
+      if (value === undefined) continue;
+      if (event.type === "run_start" && field === "input") this.#state = { value };
+      else if (event.type === "exit" && field === "output") this.#state = { value };
+      else if (event.type === "enter" && field === "input" && event.step !== undefined)
+        this.#enters.set(event.step, value);
+      else this.#last.set(`${event.type}\u0000${event.nodeId ?? ""}\u0000${field}`, value);
+    }
+  }
 }
 
-export function fromJSONL(text: string): Trace {
-  const events: unknown[] = [];
-  text.split(/\r?\n/).forEach((line, index) => {
-    if (line.trim() === "") return;
+function encodeEvent(event: TraceEvent, bases: Bases): string {
+  const out: Record<string, unknown> = { ...event };
+  if (event.type === "run_start") out.meta = { ...event.meta, version: TRACE_VERSION };
+  for (const field of FIELDS) {
+    const value = event[field];
+    if (value === undefined) continue;
+    const base = bases.get(event, field);
+    if (!base) continue;
+    const ops = diffJson(base.value, value);
+    const patch = JSON.stringify(ops);
+    if (patch.length < SHORT_PATCH || patch.length <= JSON.stringify(value).length) {
+      delete out[field];
+      out[PATCH[field]] = ops;
+    }
+  }
+  return JSON.stringify(out);
+}
+
+/** Encodes events one by one in format v2. `prefix` holds events already stored, so new ones can use them as bases. */
+export function createTraceEncoder(prefix: Trace = []): { encode(event: TraceEvent): string } {
+  const bases = new Bases();
+  for (const event of prefix) bases.update(event);
+  return {
+    encode(event) {
+      const line = encodeEvent(event, bases);
+      bases.update(event);
+      return line;
+    },
+  };
+}
+
+/** One JSON object per line in format v2. `from` writes the events from that index on, using earlier ones as bases. */
+export function toJSONL(trace: Trace, options: { readonly from?: number } = {}): string {
+  const from = options.from ?? 0;
+  const encoder = createTraceEncoder(trace.slice(0, from));
+  const lines = trace.slice(from).map((event) => encoder.encode(event));
+  return lines.length === 0 ? "" : `${lines.join("\n")}\n`;
+}
+
+/**
+ * Reads format v1 and v2. `tornTail: "drop"` drops a last line that was cut short by a crash: the text does not end
+ * with a newline and the line is not valid JSON. Any other broken line is an `INVALID_TRACE` error.
+ */
+export function fromJSONL(text: string, options: { readonly tornTail?: "drop" | "error" } = {}): Trace {
+  const lines = text.split(/\r?\n/);
+  let lastLine = lines.length - 1;
+  while (lastLine >= 0 && (lines[lastLine] as string).trim() === "") lastLine--;
+  const mayDrop = options.tornTail === "drop" && !text.endsWith("\n");
+  const raw: Record<string, unknown>[] = [];
+  for (const [index, line] of lines.entries()) {
+    if (line.trim() === "") continue;
     try {
-      events.push(JSON.parse(line));
+      raw.push(JSON.parse(line));
     } catch (cause) {
+      if (mayDrop && index === lastLine) break;
       throw new TaugraphError("INVALID_TRACE", `Line ${index + 1} is not valid JSON`, { cause });
     }
+  }
+  const bases = new Bases();
+  const events = raw.map((event, index) => {
+    const decoded = decodeEvent(event, index, bases);
+    bases.update(decoded);
+    return decoded;
   });
   return assertTrace(events);
+}
+
+function decodeEvent(raw: Record<string, unknown>, index: number, bases: Bases): TraceEvent {
+  const out: Record<string, unknown> = { ...raw };
+  for (const field of FIELDS) {
+    const ops = raw[PATCH[field]];
+    delete out[PATCH[field]];
+    const base = bases.get(out as unknown as TraceEvent, field);
+    try {
+      if (ops !== undefined) {
+        if (!Array.isArray(ops)) throw new Error(`${PATCH[field]} is not an array`);
+        if (!base) throw new Error(`${PATCH[field]} has no base`);
+        out[field] = freezeJson(applyPatch(base.value, ops as PatchOp[]), base.value);
+      } else if (raw[field] !== undefined) {
+        out[field] = freezeJson(raw[field], base?.value);
+      }
+    } catch (cause) {
+      const reason = cause instanceof Error ? cause.message : String(cause);
+      throw new TaugraphError("INVALID_TRACE", `Event ${index}: ${reason}`, { cause });
+    }
+  }
+  return out as unknown as TraceEvent;
 }
 
 /** Checks that a value is a well-formed taugraph trace and returns it typed. */
@@ -138,8 +245,8 @@ export function assertTrace(value: unknown): Trace {
   if (first.type !== "run_start" || meta?.format !== TRACE_FORMAT) {
     fail(`First event must be a "${TRACE_FORMAT}" run_start event`);
   }
-  if (meta?.version !== TRACE_VERSION) {
-    fail(`Unsupported trace version ${String(meta?.version)} (expected ${TRACE_VERSION})`);
+  if (!READABLE_VERSIONS.has(meta?.version)) {
+    fail(`Unsupported trace version ${String(meta?.version)} (expected 1 or 2)`);
   }
   events.forEach((event, index) => {
     if (typeof event !== "object" || event === null) fail(`Event ${index} is not an object`);
@@ -176,6 +283,16 @@ export function recordedSteps(trace: Trace): Map<number, RecordedStep> {
     }
   }
   return steps;
+}
+
+export type RunStatus = "running" | "paused" | "completed" | "failed";
+
+/** Where a run stands, from its last event: no `run_end` yet is `"running"` (or interrupted, if nothing is writing it). */
+export function runStatus(trace: Trace): RunStatus {
+  const last = trace[trace.length - 1];
+  if (last?.type !== "run_end") return "running";
+  const status = last.meta?.status;
+  return status === "paused" || status === "completed" ? status : "failed";
 }
 
 /** Node ids in execution order. */
