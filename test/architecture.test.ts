@@ -1,6 +1,6 @@
 // Enforces the kernel rules from the README so they cannot erode silently.
 import { readdirSync, readFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const root = join(import.meta.dirname, "..");
@@ -58,7 +58,7 @@ describe("architecture", () => {
 
   it("keeps node: modules and Node globals inside taugraph/file", () => {
     for (const { file, imports } of sources("src")) {
-      const inFile = file.startsWith(join("src", "file"));
+      const inFile = file.startsWith(join("src", "file") + sep);
       for (const spec of imports) {
         if (spec.startsWith("node:")) expect(inFile, `${file} imports ${spec}`).toBe(true);
       }
@@ -70,6 +70,16 @@ describe("architecture", () => {
     for (const { file, imports } of sources("src/file")) {
       for (const spec of imports) {
         expect(spec, `${file} imports ${spec}`).toMatch(/^(\.\.\/index\.js|node:(fs|path)|\.\/[\w-]+\.js)$/);
+      }
+    }
+  });
+
+  it("imports only relative paths, plus node:fs and node:path inside taugraph/file", () => {
+    for (const { file, imports } of sources("src")) {
+      const inFile = file.startsWith(join("src", "file") + sep);
+      for (const spec of imports) {
+        const relative = spec.startsWith("./") || spec.startsWith("../");
+        expect(relative || (inFile && /^node:(fs|path)$/.test(spec)), `${file} imports ${spec}`).toBe(true);
       }
     }
   });

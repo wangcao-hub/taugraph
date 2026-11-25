@@ -1,5 +1,5 @@
 import * as fs from "node:fs";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -7,11 +7,11 @@ import { z } from "zod";
 
 vi.mock("node:fs", async (importOriginal) => {
   const real = await importOriginal<typeof import("node:fs")>();
-  return { ...real, fsyncSync: vi.fn(real.fsyncSync) };
+  return { ...real, fsyncSync: vi.fn(real.fsyncSync), writeSync: vi.fn(real.writeSync) };
 });
 
 const { fileStore } = await import("../src/file/index.js");
-const { createGraph } = await import("../src/index.js");
+const { createGraph, isTaugraphError, runStatus } = await import("../src/index.js");
 
 const schema = z.object({ n: z.number() });
 type S = z.infer<typeof schema>;
@@ -42,5 +42,35 @@ describe("fileStore durability", () => {
     const every = await fsyncs("every");
     expect(every.count).toBe(every.events + 1); // plus the directory
     expect((await fsyncs("none")).count).toBe(0);
+  });
+
+  it("releases the run when a write fails, so the same store can resume it", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "taugraph-durability-"));
+    const store = fileStore(dir);
+    const full = Object.assign(new Error("no space"), { code: "ENOSPC" });
+    const error = await graph
+      .run(
+        { n: 0 },
+        {
+          runId: "r",
+          onEvent: (event) => {
+            if (event.seq === 2) {
+              vi.mocked(fs.writeSync).mockImplementationOnce(() => {
+                throw full;
+              });
+            }
+            store.sink(event);
+          },
+        },
+      )
+      .catch((e: unknown) => e);
+    expect(isTaugraphError(error) && error.code).toBe("SINK_FAILED");
+    expect(existsSync(join(dir, "r.lock"))).toBe(false);
+    expect(store.list()).toMatchObject([{ runId: "r", status: "interrupted" }]);
+    const trace = store.load("r");
+    expect(trace).toHaveLength(2);
+    const done = await graph.resume(trace as NonNullable<typeof trace>, undefined, { onEvent: store.sink });
+    expect(done.status).toBe("completed");
+    expect(runStatus(store.load("r") as NonNullable<typeof trace>)).toBe("completed");
   });
 });

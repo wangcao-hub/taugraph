@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -96,14 +96,26 @@ describe("fileStore", () => {
     const { trace } = await graph.run({ n: 0 });
     const runId = trace[0]?.runId as string;
     crashed(dir, trace, 3);
-    writeFileSync(join(dir, `${runId}.lock`), String(process.pid));
+    writeFileSync(join(dir, `${runId}.lock`), String(process.ppid));
     const store = fileStore(dir);
     expect(store.list()).toMatchObject([{ status: "running" }]);
     const error = await graph.resume(store.load(runId) as Trace, undefined, { onEvent: store.sink }).catch((e) => e);
-    expect(String(error)).toContain(`Run "${runId}" is being written by process ${process.pid}`);
+    expect(String(error)).toContain(`Run "${runId}" is being written by process ${process.ppid}`);
     writeFileSync(join(dir, `${runId}.lock`), String(DEAD_PID));
     const done = await graph.resume(store.load(runId) as Trace, undefined, { onEvent: store.sink });
     expect(done.status).toBe("completed");
+  });
+
+  it("takes over a lock with this process's id that this process does not hold", async () => {
+    const dir = temp();
+    const { trace } = await graph.run({ n: 0 });
+    const runId = trace[0]?.runId as string;
+    crashed(dir, trace, 3);
+    writeFileSync(join(dir, `${runId}.lock`), String(process.pid)); // left by an earlier process with the same pid
+    const store = fileStore(dir);
+    const done = await graph.resume(store.load(runId) as Trace, undefined, { onEvent: store.sink });
+    expect(done.status).toBe("completed");
+    expect(existsSync(join(dir, `${runId}.lock`))).toBe(false);
   });
 
   it("refuses gaps, duplicate runs and runIds that are not file names", async () => {
@@ -152,5 +164,83 @@ describe("fileStore", () => {
       ["failed-1", "failed"],
       ["crashed-1", "interrupted"],
     ]);
+  });
+
+  it("closes the file each time it refuses to continue a corrupt run", async () => {
+    const dir = temp();
+    const { trace } = await graph.run({ n: 0 });
+    const runId = trace[0]?.runId as string;
+    const lines = toJSONL(trace).split("\n");
+    writeFileSync(join(dir, `${runId}.jsonl`), `${lines[0]}\n{bad\n${lines[2]}\n`);
+    const store = fileStore(dir);
+    const fds = () => (existsSync("/dev/fd") ? readdirSync("/dev/fd").length : undefined);
+    const before = fds();
+    for (let i = 0; i < 20; i++) {
+      expect(() => store.sink(trace[3] as Trace[number])).toThrow("Line 2 is not valid JSON");
+    }
+    if (before !== undefined) expect(fds()).toBe(before);
+    expect(existsSync(join(dir, `${runId}.lock`))).toBe(false);
+  });
+
+  it("does not load or list a file with no complete line", async () => {
+    const dir = temp();
+    const { trace } = await graph.run({ n: 0 }, { runId: "torn" });
+    writeFileSync(join(dir, "empty.jsonl"), "");
+    writeFileSync(join(dir, "torn.jsonl"), toJSONL(trace).slice(0, 20));
+    const store = fileStore(dir);
+    expect(store.load("empty")).toBeUndefined();
+    expect(store.load("torn")).toBeUndefined();
+    expect(store.list()).toEqual([]);
+  });
+
+  it("starts a run over a file with no complete line", async () => {
+    const dir = temp();
+    const { trace } = await graph.run({ n: 0 }, { runId: "torn" });
+    writeFileSync(join(dir, "empty.jsonl"), "");
+    writeFileSync(join(dir, "torn.jsonl"), toJSONL(trace).slice(0, 20));
+    const store = fileStore(dir);
+    for (const runId of ["empty", "torn"]) {
+      const done = await graph.run({ n: 0 }, { runId, onEvent: store.sink });
+      expect(store.load(runId)).toEqual(JSON.parse(JSON.stringify(done.trace)));
+    }
+  });
+
+  it("will not continue a file with no complete line, and leaves it as it is", async () => {
+    const dir = temp();
+    const { trace } = await graph.run({ n: 0 }, { runId: "torn" });
+    const torn = toJSONL(trace).slice(0, 20);
+    writeFileSync(join(dir, "torn.jsonl"), torn);
+    expect(() => fileStore(dir).sink(trace[3] as Trace[number])).toThrow(
+      `Run "torn" has no file in ${dir} to continue`,
+    );
+    expect(readFileSync(join(dir, "torn.jsonl"), "utf8")).toBe(torn);
+  });
+
+  it("drops a last line without a newline even when it is valid JSON, and continues after it", async () => {
+    const dir = temp();
+    const { trace } = await graph.run({ n: 0 });
+    const runId = trace[0]?.runId as string;
+    const cut = trace.findIndex((e) => e.type === "exit" && e.nodeId === "a") + 1;
+    writeFileSync(join(dir, `${runId}.jsonl`), toJSONL(trace.slice(0, cut)).slice(0, -1)); // the last "\n" was lost
+    const store = fileStore(dir);
+    const loaded = store.load(runId) as Trace;
+    expect(loaded).toHaveLength(cut - 1);
+    expect(store.list()).toMatchObject([{ runId, status: "interrupted", events: cut - 1 }]);
+    const done = await graph.resume(loaded, undefined, { onEvent: store.sink });
+    expect(done.state).toMatchObject({ n: 2, sent: true });
+    expect(runStatus(store.load(runId) as Trace)).toBe("completed");
+  });
+
+  it("leaves the file byte for byte as it is when it refuses a gap", async () => {
+    const dir = temp();
+    const { trace } = await graph.run({ n: 0 });
+    const runId = trace[0]?.runId as string;
+    crashed(dir, trace, 3);
+    const path = join(dir, `${runId}.jsonl`);
+    const before = readFileSync(path);
+    expect(() => fileStore(dir).sink(trace[5] as Trace[number])).toThrow(
+      `Run "${runId}" on disk ends at seq 2, but the next event is seq 5`,
+    );
+    expect(readFileSync(path)).toEqual(before);
   });
 });
