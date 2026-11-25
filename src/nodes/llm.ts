@@ -27,7 +27,10 @@ export interface ToolCall {
 /** How the model may use tools: freely, not at all, at least one, or this one. */
 export type ToolChoice = "auto" | "none" | "required" | { readonly name: string };
 
-/** How much a model should think before it answers. Adapters map it to the provider's setting, rounding to the nearest level the model has. */
+/**
+ * How much a model should think before it answers. Adapters map it to the provider's setting; an adapter that knows
+ * which levels a model has rounds to the nearest one.
+ */
 export type ReasoningLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 /**
@@ -72,7 +75,10 @@ export type ChatMessage =
       readonly toolCalls?: readonly ToolCall[];
       /** What the model thought first. */
       readonly reasoning?: readonly ReasoningPart[];
-      /** The `LLMModel.id` that wrote this message; adapters send reasoning signatures back only to the same model. */
+      /**
+       * The `LLMModel.id` that wrote this message (not `LLMResponse.model`). Adapters send reasoning signatures,
+       * `redacted` parts and `ToolCall.signature` back only when it equals their own `id`.
+       */
       readonly model?: string;
     }
   | {
@@ -100,6 +106,7 @@ export interface LLMRequest {
 
 export interface LLMResponse {
   readonly content: string;
+  /** The provider's name for the model that answered, e.g. "gpt-4o-mini-2024-07-18". Not the `LLMModel.id`. */
   readonly model?: string;
   readonly finishReason?: string;
   readonly usage?: {
@@ -115,7 +122,10 @@ export interface LLMResponse {
 }
 
 export interface LLMModel {
-  /** Recorded in every `llm_call` event, e.g. "openai:gpt-4o-mini" or "ollama:qwen3". */
+  /**
+   * Recorded in every `llm_call` event, e.g. "openai:gpt-4o-mini" or "ollama:qwen3". It also decides which assistant
+   * messages count as this model's own for reasoning passback, so keep it stable and different for each model.
+   */
   readonly id: string;
   complete(request: LLMRequest, options: { readonly signal: AbortSignal }): MaybePromise<LLMResponse>;
 }

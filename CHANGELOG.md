@@ -8,6 +8,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 - **Breaking:** the `content` of `user` and `tool` messages is `string | ContentPart[]`, so they can carry images. Code that builds messages is unaffected; code that reads `content` as a string no longer compiles. An adapter that sends text only replaces `m.content` with `textOf(m.content)`, which throws on images unless given `{ imagePlaceholder }`. Template strings, `+` and `String()` still compile but turn parts into `[object Object]`, and JavaScript adapters get no compile error, so search for reads of `content` too.
 - Types: `ChatMessage` is now a union by `role` and includes `role: "tool"`. Code that only reads `role` and `content` is unaffected, and nothing changes at run time for code that sends no tool messages. An adapter that maps `role` into a provider SDK's message type, or switches over `role` exhaustively, needs a `tool` branch; TypeScript points to the line.
+- Assistant messages written by the agent now always carry `model`, may carry `reasoning`, and tool calls may carry `signature`. An adapter that forwards messages as they are sends these fields too, and strict endpoints such as OpenAI's refuse them; build the provider's message from `role` and `content` (and tool fields) instead.
 
 ### Added
 

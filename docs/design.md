@@ -71,7 +71,7 @@ Images can be references (`url: "media:abc"`) that the adapter reads at call tim
 
 ## Reasoning: levels, and signatures per model
 
-`reasoning` is one of seven levels, not a token budget. OpenAI-style providers take levels and refuse budgets, Claude and Gemini 2.5 take budgets, and a level carries over between them when an adapter maps it, while a budget does not. A request then reads the same in the trace whichever model serves it; a precise budget is still possible through `extra`.
+`reasoning` is one of seven levels, not a token budget. OpenAI-style providers take levels and refuse budgets, older Claude models and Gemini 2.5 take budgets, and a level carries over between them when an adapter maps it, while a budget does not. A request then reads the same in the trace whichever model serves it; a precise budget is still possible through `extra`.
 
 Thinking comes back as readable text with an optional opaque `signature`, not as provider data, so traces stay readable. Signatures are bound to the model that made them, and replay can swap the model, so every assistant message the agent writes records `model` and adapters send signatures only to that model.
 

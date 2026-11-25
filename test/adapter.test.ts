@@ -265,4 +265,38 @@ describe("OpenAI-compatible adapter", () => {
     );
     expect(body.thinking).toEqual({ type: "enabled" }); // extra wins
   });
+
+  it("keeps its own reasoning to itself when sendReasoning is false", async () => {
+    let body: Record<string, unknown> = {};
+    vi.stubGlobal("fetch", async (_url: string, init: RequestInit) => {
+      body = JSON.parse(String(init.body));
+      return Response.json({ choices: [{ message: { content: "好" } }] });
+    });
+    const model = openAICompatible({ baseURL: "http://x/v1", model: "m", sendReasoning: false });
+    const mine = { role: "assistant" as const, content: "a", model: "openai-compatible:m", reasoning: [{ text: "r" }] };
+    await model.complete(
+      { messages: [{ role: "user", content: "q" }, mine] },
+      { signal: new AbortController().signal },
+    );
+    expect(body.messages).toEqual([
+      { role: "user", content: "q" },
+      { role: "assistant", content: "a" },
+    ]);
+  });
+
+  it("leaves reasoningTokens out when the provider does not count them", async () => {
+    const replies = [
+      { prompt_tokens: 1, completion_tokens: 2, completion_tokens_details: { reasoning_tokens: null } },
+      { prompt_tokens: 1, completion_tokens: 2 },
+    ];
+    for (const usage of replies) {
+      vi.stubGlobal("fetch", async () => Response.json({ choices: [{ message: { content: "好" } }], usage }));
+      const model = openAICompatible({ baseURL: "http://x/v1", model: "m" });
+      const response = await model.complete(
+        { messages: [{ role: "user", content: "q" }] },
+        { signal: new AbortController().signal },
+      );
+      expect(response.usage).toStrictEqual({ inputTokens: 1, outputTokens: 2 });
+    }
+  });
 });

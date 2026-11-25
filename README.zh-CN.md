@@ -355,28 +355,23 @@ const model = openAICompatible({
 
 ## 思考型模型
 
-请求上的 `reasoning` 决定模型先想多少：`"off"`、`"minimal"`、`"low"`、`"medium"`、`"high"`、`"xhigh"` 或 `"max"`。不填时适配器什么都不发，由模型用默认值。适配器把档位换成各家的设置，模型没有的档位就近取；按 token 预算控制的服务，由适配器把档位换算成预算。
+请求上的 `reasoning` 决定模型先想多少：`"off"`、`"minimal"`、`"low"`、`"medium"`、`"high"`、`"xhigh"` 或 `"max"`。不填时适配器什么都不发，由模型用默认值。适配器把档位换成各家的设置；知道模型有哪些档的适配器就近取档，对接按 token 预算控制的服务时把档位换算成预算。
 
 ```ts
 const agent = createAgent({ model, tools, reasoning: "high" }); // 这次运行里的每一次模型调用
 ```
 
 - 回复里，模型想了什么在 `response.reasoning`（`{ text, signature?, redacted? }[]`），思考用掉的 token 数在 `usage.reasoningTokens`，已经算在 `outputTokens` 里。两者都会记进 `llm_call` 事件。
-- 有几家要求工具循环的下一次请求原样带回模型之前的思考，否则拒绝请求：DeepSeek V4（`reasoning_content`）、Claude（带签名的思考块）、Gemini 3（每个工具调用上的 `thoughtSignature`，存在 `ToolCall.signature`）。agent 把思考和签名存进它写的 assistant 消息，下一轮自动带上。
+- 有几家要求工具循环的下一次请求原样带回模型之前的思考，否则拒绝请求：DeepSeek V4（`reasoning_content`）、Claude（带签名的思考块）、Gemini 3（一步里第一个工具调用上的 `thoughtSignature`，存在 `ToolCall.signature`）。agent 把思考和签名存进它写的 assistant 消息，下一轮自动带上。
 - 签名只对写它的模型有效，所以 agent 写的每条 assistant 消息都记下 `model`，也就是 `LLMModel.id`。适配器只在 `m.model` 等于自己的 `id` 时发回思考和签名，回放时换了模型也不会把一个模型的签名发给另一个模型。
-- [OpenAI 兼容适配器](./examples/adapters/openai-compatible.ts) 默认发 `reasoning_effort`（`"off"` 写成 `"none"`），从回复里读 `reasoning_content` 或 `reasoning`，并把自己的 `reasoning_content` 发回。默认把档位原样发出；模型不接受某一档时，在 `reasoningParams` 里换算。有自己开关的服务用 `reasoningParams`：
+- assistant 消息记有 `model`，所以换模型回放时，从第一次重新执行的模型调用起状态就和录制不同，哪怕新模型回答一样；之后的步骤实时执行，写操作步骤会以 `WRITE_BLOCKED` 停下。
+- [OpenAI 兼容适配器](./examples/adapters/openai-compatible.ts) 把档位原样作为 `reasoning_effort` 发出（`"off"` 写成 `"none"`），从回复里读 `reasoning_content` 或 `reasoning`，并把自己的 `reasoning_content` 发回；对不接受这个字段的服务（如 Groq 和 Cerebras）设 `sendReasoning: false`。服务有自己的开关、或不接受某一档时，在 `reasoningParams` 里换算档位：
 
 ```ts
-// DeepSeek V4：一个思考开关，加上 low、high 或 max
+// DeepSeek V4：一个思考开关，档位由它自己换算
 const deepseek = (level: ReasoningLevel) =>
-  level === "off"
-    ? { thinking: { type: "disabled" } }
-    : {
-        thinking: { type: "enabled" },
-        reasoning_effort:
-          level === "minimal" || level === "low" ? "low" : level === "xhigh" || level === "max" ? "max" : "high",
-      };
-// Qwen 和 vLLM
+  level === "off" ? { thinking: { type: "disabled" } } : { thinking: { type: "enabled" }, reasoning_effort: level };
+// 部署在 vLLM 或 SGLang 上的 Qwen
 const qwen = (level: ReasoningLevel) => ({ chat_template_kwargs: { enable_thinking: level !== "off" } });
 
 const model = openAICompatible({

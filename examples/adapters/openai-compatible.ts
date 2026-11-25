@@ -25,6 +25,11 @@ export interface OpenAICompatibleOptions {
   readonly resolveImage?: ImageResolver;
   /** Request parameters for a reasoning level, merged before `extra`. Default: `{ reasoning_effort }`, "off" as "none". */
   readonly reasoningParams?: (level: ReasoningLevel) => Record<string, unknown>;
+  /**
+   * Send a model's own reasoning back as `reasoning_content`. Default true: DeepSeek V4 and Kimi refuse a tool loop
+   * without it. Set false for endpoints that refuse the field in input messages, such as Groq and Cerebras.
+   */
+  readonly sendReasoning?: boolean;
 }
 
 /** A tool call as OpenAI sends it: arguments are a JSON string. */
@@ -202,7 +207,7 @@ export function openAICompatible(options: OpenAICompatibleOptions): LLMModel {
         },
         body: JSON.stringify({
           model: options.model,
-          messages: toOpenAIMessages(messages, id),
+          messages: toOpenAIMessages(messages, options.sendReasoning === false ? undefined : id),
           temperature: request.temperature,
           max_tokens: request.maxTokens,
           ...(request.responseFormat === "json" && { response_format: { type: "json_object" } }),
@@ -229,7 +234,7 @@ export function openAICompatible(options: OpenAICompatibleOptions): LLMModel {
         usage: {
           inputTokens: body.usage?.prompt_tokens ?? 0,
           outputTokens: body.usage?.completion_tokens ?? 0,
-          ...(reasoningTokens !== undefined && { reasoningTokens }),
+          ...(typeof reasoningTokens === "number" && { reasoningTokens }),
         },
         ...(thought && { reasoning: [{ text: thought }] }),
         ...(calls?.length && { toolCalls: fromOpenAIToolCalls(calls, round) }),

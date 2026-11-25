@@ -355,28 +355,23 @@ const model = openAICompatible({
 
 ## Reasoning models
 
-`reasoning` on a request says how much the model should think first: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"` or `"max"`. Leave it out and the adapter sends nothing, so the model uses its default. Adapters map the level to the provider's setting and round to the nearest level the model has; for providers that take a token budget, the adapter turns levels into budgets.
+`reasoning` on a request says how much the model should think first: `"off"`, `"minimal"`, `"low"`, `"medium"`, `"high"`, `"xhigh"` or `"max"`. Leave it out and the adapter sends nothing, so the model uses its default. Adapters map the level to the provider's setting; one that knows the model's levels rounds to the nearest, and one for a provider that takes a token budget turns levels into budgets.
 
 ```ts
 const agent = createAgent({ model, tools, reasoning: "high" }); // every model call in the run
 ```
 
 - Replies carry what the model thought in `response.reasoning` (`{ text, signature?, redacted? }[]`) and its token count in `usage.reasoningTokens`, which is part of `outputTokens`. Both are in the `llm_call` event.
-- Some providers refuse the next request of a tool loop unless the model's earlier thinking comes back unchanged: DeepSeek V4 (`reasoning_content`), Claude (signed thinking blocks) and Gemini 3 (a `thoughtSignature` on each tool call, kept in `ToolCall.signature`). The agent stores reasoning and signatures in the assistant messages it writes, so the next round sends them.
+- Some providers refuse the next request of a tool loop unless the model's earlier thinking comes back unchanged: DeepSeek V4 (`reasoning_content`), Claude (signed thinking blocks) and Gemini 3 (a `thoughtSignature` on the first tool call of a step, kept in `ToolCall.signature`). The agent stores reasoning and signatures in the assistant messages it writes, so the next round sends them.
 - A signature is only valid for the model that wrote it, so every assistant message the agent writes records `model`, the `LLMModel.id`. Adapters send reasoning and signatures back only when `m.model` is their own `id`, so a replay that swaps the model never sends one model's signatures to another.
-- The [OpenAI-compatible adapter](./examples/adapters/openai-compatible.ts) sends `reasoning_effort` by default (`"off"` as `"none"`), reads `reasoning_content` or `reasoning` from replies, and sends its own `reasoning_content` back. The default sends the level as it is; if a model refuses a level, map it in `reasoningParams`. Providers with their own switch take `reasoningParams`:
+- Assistant messages record `model`, so a replay that swaps the model diverges at the first model call that runs again, even if the new model answers the same; later steps run live and write steps stop with `WRITE_BLOCKED`.
+- The [OpenAI-compatible adapter](./examples/adapters/openai-compatible.ts) sends the level as `reasoning_effort` as it is (`"off"` as `"none"`), reads `reasoning_content` or `reasoning` from replies, and sends its own `reasoning_content` back; set `sendReasoning: false` for endpoints that refuse that field, such as Groq and Cerebras. When a provider has its own switch, or refuses a level, map levels in `reasoningParams`:
 
 ```ts
-// DeepSeek V4: a thinking switch, plus low, high or max
+// DeepSeek V4: a thinking switch; it maps the levels itself
 const deepseek = (level: ReasoningLevel) =>
-  level === "off"
-    ? { thinking: { type: "disabled" } }
-    : {
-        thinking: { type: "enabled" },
-        reasoning_effort:
-          level === "minimal" || level === "low" ? "low" : level === "xhigh" || level === "max" ? "max" : "high",
-      };
-// Qwen and vLLM
+  level === "off" ? { thinking: { type: "disabled" } } : { thinking: { type: "enabled" }, reasoning_effort: level };
+// Qwen on vLLM or SGLang
 const qwen = (level: ReasoningLevel) => ({ chat_template_kwargs: { enable_thinking: level !== "off" } });
 
 const model = openAICompatible({
