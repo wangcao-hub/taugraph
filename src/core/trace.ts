@@ -165,8 +165,12 @@ function encodeEvent(event: TraceEvent, bases: Bases): string {
   return `${line.slice(0, -1)}${line === "{}" ? patches.slice(1) : patches}}`;
 }
 
-/** Encodes events one by one in format v2. `prefix` holds events already stored, so new ones can use them as bases. */
+/**
+ * Encodes events one by one in format v2. `prefix` holds events already stored, so new ones can use them as bases.
+ * A file keeps the format of its header: after a version 1 prefix, events are written in full, without patches.
+ */
 export function createTraceEncoder(prefix: Trace = []): { encode(event: TraceEvent): string } {
+  if (prefix[0]?.meta?.version === 1) return { encode: (event) => JSON.stringify(event) };
   const bases = new Bases();
   for (const event of prefix) bases.update(event);
   return {
@@ -178,7 +182,10 @@ export function createTraceEncoder(prefix: Trace = []): { encode(event: TraceEve
   };
 }
 
-/** One JSON object per line in format v2. `from` writes the events from that index on, using earlier ones as bases. */
+/**
+ * One JSON object per line in format v2. `from` writes the events from that index on, using earlier ones as bases;
+ * for a trace read from version 1, `from` above 0 writes full lines, so the file stays version 1.
+ */
 export function toJSONL(trace: Trace, options: { readonly from?: number } = {}): string {
   const from = options.from ?? 0;
   const encoder = createTraceEncoder(trace.slice(0, from));

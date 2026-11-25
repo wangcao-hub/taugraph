@@ -77,19 +77,23 @@ function pidIn(content: string): number | undefined {
 const held = new Set<string>();
 let releaseOnExit = false;
 
-/** When this process started, in ms since epoch. The same in every thread. */
+/** When this process started, in ms since epoch. Process-wide on Node; on Bun and Deno each thread computes its own. */
 const started = Date.now() - process.uptime() * 1000;
+
+/** Slack for the lock's mtime: FAT stores mtimes in 2-second steps. */
+const MTIME_STEP = 2000;
 
 /**
  * Whether the process that wrote a lock is still writing the run. A lock with this process's id that this thread
- * does not hold is live if it was written since this process started (another thread or store of this process);
- * an older one was left by an earlier process that had the same id (e.g. a restarted container).
+ * does not hold is live if it was written since this process started (another thread or store of this process),
+ * give or take one FAT mtime step; an older one was left by an earlier process that had the same id (e.g. a
+ * restarted container).
  */
 function isLive(lock: string, pid: number): boolean {
   if (pid !== process.pid) return alive(pid);
   if (held.has(lock)) return true;
   try {
-    return statSync(lock).mtimeMs >= started;
+    return statSync(lock).mtimeMs >= started - MTIME_STEP;
   } catch {
     return false; // gone
   }

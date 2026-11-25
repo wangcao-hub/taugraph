@@ -45,7 +45,7 @@ Written by nodes through `ctx.trace.append({ type, input?, output?, meta? })`. T
 
 Any other non-empty string is allowed for custom plugins. Prefix it (`myplugin.event`) to avoid collisions.
 
-In `llm_call.input.messages` (the `content` of user and tool messages) and in the agent's `tool_call.output.content`, content is either a string or an array of parts: `{ type: "text", text }`, `{ type: "image", data, mimeType }` (base64) or `{ type: "image", url, mimeType? }`. A base64 image is stored again in every step's state and every `llm_call` that sends it; pass a reference as `url` and let the adapter read it to keep traces small. In `recorded` mode, replay reuses a step's recorded `exit` state when the step sees its recorded input, so references only have to resolve for steps that run again (`source` `live` or `override`).
+In `llm_call.input.messages` (the `content` of user and tool messages) and in the agent's `tool_call.output.content`, content is either a string or an array of parts: `{ type: "text", text }`, `{ type: "image", data, mimeType }` (base64) or `{ type: "image", url, mimeType? }`. `toJSONL` and `fileStore` write a base64 image once when it enters the state and once in the first `llm_call` that sends it; a sink that writes `JSON.stringify(event)` for each event repeats it at every step. Pass a reference as `url` and let the adapter read it to keep traces small. In `recorded` mode, replay reuses a step's recorded `exit` state when the step sees its recorded input, so references only have to resolve for steps that run again (`source` `live` or `override`).
 
 `llm_call.output.reasoning` holds what the model thought (`{ text, signature?, redacted? }[]`) and `llm_call.output.usage.reasoningTokens` its token count. Assistant messages may carry `reasoning` and `model`, the `LLMModel.id` that wrote them; tool calls may carry `signature`. Adapters send signatures back only to the model named in `model`.
 
@@ -87,15 +87,15 @@ run_end(completed)
 
 `toJSONL` writes one event per line. Events keep their shape in memory; on disk, an `input` or `output` field may be written as `inputPatch` / `outputPatch`, a JSON Patch (RFC 6902, only `add`, `remove` and `replace`, with `/-` to append to an array) against a base value:
 
-| field                           | base                                                                                           |
-| ------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `run_start.input`               | none, always written in full                                                                   |
-| `enter.input`, `run_end.output` | the current state: the `run_start` input until the first `exit`, then the latest `exit` output |
-| `exit.output`                   | the latest `enter.input` of the same step                                                      |
-| any other field                 | the same field of the previous event with the same `type` and `nodeId`                         |
+| field                           | base                                                                                                  |
+| ------------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `run_start.input`               | none, always written in full                                                                          |
+| `enter.input`, `run_end.output` | the current state: the `run_start` input until the first `exit`, then the latest `exit` output        |
+| `exit.output`                   | the latest `enter.input` of the same step                                                             |
+| any other field                 | the same field of the most recent earlier event with the same `type` and `nodeId` that has that field |
 
 `toJSONL` uses the patch when it is shorter than 4096 characters or not longer than the full value; `[]` means equal to the base. Readers check patches strictly: `add` into an array must use `/-`, `replace` and `remove` need the key or index to exist, only an object's own keys count, `__proto__` is an ordinary key, and the whole value (path `""`) can be replaced but not removed. `fromJSONL` applies patches in order and returns full events. `toJSONL(trace, { from })` writes the events from `from` on with earlier events as bases, so chunks written that way concatenate into a valid file; `createTraceEncoder(prefix)` does the same one event at a time for a store. `fromJSONL(text, { tornTail: "drop" })` drops a last line that a crash cut short (no final newline, not valid JSON); any other broken line is `INVALID_TRACE`.
 
 ## Versioning
 
-`meta.version` on `run_start` is bumped on any breaking change to this format. Version 2 added patches; `fromJSONL` reads versions 1 and 2 and rejects others, and `replay` and `resume` accept both. `toJSONL` writes version 2, also for a trace read from version 1. A file started by an older writer and continued by a newer one may mix full and patched lines; readers handle patch fields wherever they appear. Additive changes, such as new event types or new `meta` fields, do not bump the version; consumers should ignore what they do not know.
+`meta.version` on `run_start` is bumped on any breaking change to this format. Version 2 added patches; `fromJSONL` reads versions 1 and 2 and rejects others, and `replay` and `resume` accept both. `toJSONL` writes version 2, also for a trace read from version 1. A store continuing a version 1 file writes full lines, so the file stays version 1. Additive changes, such as new event types or new `meta` fields, do not bump the version; consumers should ignore what they do not know.

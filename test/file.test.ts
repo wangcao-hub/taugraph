@@ -137,6 +137,23 @@ describe("fileStore", () => {
     expect(readFileSync(lock, "utf8")).toBe(String(process.pid));
   });
 
+  it("refuses a lock with this process's id dated up to 2 s before it started: FAT stores mtimes in 2 s steps", async () => {
+    const dir = temp();
+    const { trace } = await graph.run({ n: 0 });
+    const runId = trace[0]?.runId as string;
+    crashed(dir, trace, 3);
+    const lock = join(dir, `${runId}.lock`);
+    writeFileSync(lock, String(process.pid));
+    const justBefore = new Date(Date.now() - process.uptime() * 1000 - 1000);
+    utimesSync(lock, justBefore, justBefore);
+    const store = fileStore(dir);
+    expect(store.list()).toMatchObject([{ runId, status: "running" }]);
+    expect(() => store.sink(trace[3] as Trace[number])).toThrow(
+      `Run "${runId}" is being written by process ${process.pid}`,
+    );
+    expect(readFileSync(lock, "utf8")).toBe(String(process.pid));
+  });
+
   it("refuses a second store of this process while the first writes the run, however the directory is written", async () => {
     const dir = temp();
     const { trace } = await graph.run({ n: 0 });

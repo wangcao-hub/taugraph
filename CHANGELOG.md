@@ -6,7 +6,8 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Changed
 
-- Trace format version 2: `toJSONL` writes each `input` / `output` as a JSON Patch against a base value when the patch is under 4096 characters or not longer than the value, so traces grow with what changed instead of with the square of the run. `fromJSONL`, `resume` and `replay` read versions 1 and 2. In memory, events keep their shape, and consecutive states share the parts that did not change.
+- **Breaking:** trace format version 2: `toJSONL` writes each `input` / `output` as a JSON Patch against a base value when the patch is under 4096 characters or not longer than the value, so traces grow with what changed instead of with the square of the run. `fromJSONL`, `resume` and `replay` read versions 1 and 2. In memory, events keep their shape, and consecutive states share the parts that did not change. taugraph 0.3 and older reject version 2 files. Code that parses `toJSONL` or `fileStore` lines itself now meets `inputPatch` / `outputPatch` instead of `input` / `output`, so read them with `fromJSONL` from 0.4.
+- `freezeJson` (state and payload checks) now rejects arrays with holes (`INVALID_STATE`; before, holes became `null` on disk), and a `__proto__` key in state is kept as an ordinary key.
 
 ### Added
 

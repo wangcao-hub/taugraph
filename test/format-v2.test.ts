@@ -92,6 +92,22 @@ describe("trace format v2", () => {
     expect(read.slice(1)).toEqual(plain(trace).slice(1));
   });
 
+  it("continues a version 1 trace with full lines, so the file stays version 1", () => {
+    const { trace } = agentRun(3, 50);
+    const v1Lines = trace.map((e, i) => JSON.stringify(i === 0 ? { ...e, meta: { ...e.meta, version: 1 } } : e));
+    const v1 = fromJSONL(v1Lines.join("\n"));
+    const cut = 4;
+    const head = v1Lines.slice(0, cut).join("\n");
+    const encoder = createTraceEncoder(v1.slice(0, cut));
+    const lines = v1.slice(cut).map((e) => encoder.encode(e));
+    for (const line of lines) expect(line).not.toMatch(/"(input|output)Patch"/);
+    expect(fromJSONL(`${head}\n${lines.join("\n")}\n`)).toEqual(plain(v1));
+    const chunk = toJSONL(v1, { from: cut });
+    expect(chunk).not.toMatch(/"(input|output)Patch"/);
+    expect(fromJSONL(`${head}\n${chunk}`)).toEqual(plain(v1));
+    expect(toJSONL(v1)).toContain('"outputPatch"');
+  });
+
   it("drops a torn last line only when asked, and never a broken line in the middle", () => {
     const { trace } = agentRun(2, 50);
     const text = toJSONL(trace);
