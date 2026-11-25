@@ -2,7 +2,8 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import type { AgentState } from "../src/agent/index.js";
 import { createAgent, tool } from "../src/agent/index.js";
-import { createGraph, type TraceEvent } from "../src/index.js";
+import { freezeJson } from "../src/core/util.js";
+import { createGraph, TaugraphError, type TraceEvent } from "../src/index.js";
 
 const enters = (trace: readonly TraceEvent[], nodeId: string) =>
   trace.filter((e) => e.type === "enter" && e.nodeId === nodeId).map((e) => e.input);
@@ -61,5 +62,38 @@ describe("structural sharing", () => {
     const event = trace.find((e) => e.type === "custom.event");
     expect(event?.input).toEqual({ list: [1, 2] });
     expect(event?.input).not.toBe(payload);
+    const list = (event?.input as { list?: number[] } | undefined)?.list;
+    expect(list).not.toBe(payload.list);
+    expect(Object.isFrozen(list)).toBe(true);
+  });
+
+  it("rejects a hole in an array even when the array has the same length as before", async () => {
+    const schema = z.object({ a: z.array(z.number()) });
+    const graph = createGraph(schema, {
+      start: "a",
+      nodes: {
+        a: (s: z.infer<typeof schema>) => {
+          const a = [...s.a];
+          delete a[1];
+          return { a };
+        },
+      },
+      endNodes: ["a"],
+    });
+    const error = await graph.run({ a: [1, 2, 3] }).then(
+      () => undefined,
+      (thrown: unknown) => thrown,
+    );
+    expect(error).toBeInstanceOf(TaugraphError);
+    expect((error as TaugraphError).code).toBe("INVALID_STATE");
+    expect((error as TaugraphError).message).toMatch(/a\[1\]: hole in array/);
+  });
+
+  it("keeps a __proto__ key as an own property instead of setting the prototype", () => {
+    const result = freezeJson(JSON.parse('{"__proto__":{"admin":true},"x":1}') as object);
+    expect(Object.getPrototypeOf(result)).toBe(Object.prototype);
+    expect(Object.hasOwn(result, "__proto__")).toBe(true);
+    expect((result as { admin?: unknown }).admin).toBeUndefined();
+    expect(JSON.stringify(result)).toContain('"__proto__":{"admin":true}');
   });
 });

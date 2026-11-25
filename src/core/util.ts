@@ -28,7 +28,8 @@ const checked = new WeakSet<object>();
  *
  * Parts that `freezeJson` made earlier are reused as they are, and so is every part of `base`
  * (also made by `freezeJson`) that equals the part at the same position: consecutive states
- * share whatever did not change, which keeps traces linear in memory.
+ * share whatever did not change, which keeps traces linear in memory. When an equal part of
+ * `base` is reused, its key order is the base's.
  */
 export function freezeJson<T>(value: T, base?: unknown): T {
   return copy(value, "", new Set(), base) as T;
@@ -52,10 +53,13 @@ function copy(value: unknown, path: string, ancestors: Set<object>, base: unknow
   let result: object;
   if (Array.isArray(value)) {
     const old = Array.isArray(reuse) ? (reuse as readonly unknown[]) : undefined;
-    const items = value.map((item, i) => {
+    const items: unknown[] = [];
+    for (let i = 0; i < value.length; i++) {
+      if (!(i in value)) throw new NotJsonError(`${path}[${i}]`, "hole in array");
+      const item: unknown = value[i];
       if (item === undefined) throw new NotJsonError(`${path}[${i}]`, "undefined in array");
-      return copy(item, `${path}[${i}]`, ancestors, old?.[i]);
-    });
+      items.push(copy(item, `${path}[${i}]`, ancestors, old?.[i]));
+    }
     result =
       old && old.length === items.length && items.every((item, i) => item === old[i]) ? old : Object.freeze(items);
   } else {
@@ -67,8 +71,14 @@ function copy(value: unknown, path: string, ancestors: Set<object>, base: unknow
     const old = reuse && !Array.isArray(reuse) ? (reuse as Record<string, unknown>) : undefined;
     const out: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value)) {
-      out[key] =
-        item === undefined ? undefined : copy(item, path === "" ? key : `${path}.${key}`, ancestors, old?.[key]);
+      const prev = old && Object.hasOwn(old, key) ? old[key] : undefined;
+      // defineProperty, not assignment: `out["__proto__"] = x` would set the prototype instead.
+      Object.defineProperty(out, key, {
+        value: item === undefined ? undefined : copy(item, path === "" ? key : `${path}.${key}`, ancestors, prev),
+        enumerable: true,
+        writable: true,
+        configurable: true,
+      });
     }
     const keys = Object.keys(out);
     result =
