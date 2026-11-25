@@ -1,5 +1,5 @@
 import { TaugraphError } from "./errors.js";
-import { applyPatch, diffJson, type PatchOp } from "./patch.js";
+import { applyPatch, diffJson, jsonLengthAtMost, type PatchOp } from "./patch.js";
 import type { KernelEventType, Trace, TraceEvent, TraceEventType } from "./types.js";
 import { freezeJson, jsonEqual } from "./util.js";
 
@@ -147,19 +147,22 @@ class Bases {
 function encodeEvent(event: TraceEvent, bases: Bases): string {
   const out: Record<string, unknown> = { ...event };
   if (event.type === "run_start") out.meta = { ...event.meta, version: TRACE_VERSION };
+  let patches = "";
   for (const field of FIELDS) {
     const value = event[field];
     if (value === undefined) continue;
     const base = bases.get(event, field);
     if (!base) continue;
-    const ops = diffJson(base.value, value);
-    const patch = JSON.stringify(ops);
-    if (patch.length < SHORT_PATCH || patch.length <= JSON.stringify(value).length) {
+    const patch = JSON.stringify(diffJson(base.value, value));
+    if (patch.length < SHORT_PATCH || patch.length <= jsonLengthAtMost(value, patch.length)) {
       delete out[field];
-      out[PATCH[field]] = ops;
+      patches += `,"${PATCH[field]}":${patch}`;
     }
   }
-  return JSON.stringify(out);
+  const line = JSON.stringify(out);
+  if (patches === "") return line;
+  // The patch keys go last, in the order of FIELDS, as if they had been added to `out`.
+  return `${line.slice(0, -1)}${line === "{}" ? patches.slice(1) : patches}}`;
 }
 
 /** Encodes events one by one in format v2. `prefix` holds events already stored, so new ones can use them as bases. */
@@ -195,13 +198,18 @@ export function fromJSONL(text: string, options: { readonly tornTail?: "drop" | 
   const raw: Record<string, unknown>[] = [];
   for (const [index, line] of lines.entries()) {
     if (line.trim() === "") continue;
+    let event: unknown;
     try {
-      raw.push(JSON.parse(line));
+      event = JSON.parse(line);
     } catch (cause) {
       if (mayDrop && index === lastLine) break;
       throw new TaugraphError("INVALID_TRACE", `Line ${index + 1} is not valid JSON`, { cause });
     }
+    if (!isRecord(event)) throw new TaugraphError("INVALID_TRACE", `Event ${raw.length} is not an object`);
+    raw.push(event);
   }
+  // Check the header before applying any patch: a newer version may use patches this reader does not know.
+  if (raw[0] !== undefined) assertHeader(raw[0]);
   const bases = new Bases();
   const events = raw.map((event, index) => {
     const decoded = decodeEvent(event, index, bases);
@@ -241,13 +249,7 @@ export function assertTrace(value: unknown): Trace {
   if (!Array.isArray(value) || value.length === 0) fail("Trace must be a non-empty array of events");
   const events = value as Record<string, unknown>[];
   const first = events[0] as Record<string, unknown>;
-  const meta = first.meta as Record<string, unknown> | undefined;
-  if (first.type !== "run_start" || meta?.format !== TRACE_FORMAT) {
-    fail(`First event must be a "${TRACE_FORMAT}" run_start event`);
-  }
-  if (!READABLE_VERSIONS.has(meta?.version)) {
-    fail(`Unsupported trace version ${String(meta?.version)} (expected 1 or 2)`);
-  }
+  assertHeader(first);
   events.forEach((event, index) => {
     if (typeof event !== "object" || event === null) fail(`Event ${index} is not an object`);
     if (event.seq !== index) fail(`Event ${index} has seq ${String(event.seq)}; traces must be complete and ordered`);
@@ -256,6 +258,17 @@ export function assertTrace(value: unknown): Trace {
     if (typeof event.timestamp !== "number") fail(`Event ${index} has no timestamp`);
   });
   return value as Trace;
+}
+
+/** The first event must be a run_start in a format and version this reader knows. */
+function assertHeader(first: Record<string, unknown>): void {
+  const meta = first.meta as Record<string, unknown> | undefined;
+  if (first.type !== "run_start" || meta?.format !== TRACE_FORMAT) {
+    throw new TaugraphError("INVALID_TRACE", `First event must be a "${TRACE_FORMAT}" run_start event`);
+  }
+  if (!READABLE_VERSIONS.has(meta?.version)) {
+    throw new TaugraphError("INVALID_TRACE", `Unsupported trace version ${String(meta?.version)} (expected 1 or 2)`);
+  }
 }
 
 // ---------------------------------------------------------------------------

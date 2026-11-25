@@ -6,12 +6,22 @@ import {
   createTraceEncoder,
   fromJSONL,
   runStatus,
+  type StandardSchemaV1,
   TRACE_VERSION,
   type Trace,
   toJSONL,
 } from "../src/index.js";
 
 const plain = (trace: Trace) => JSON.parse(JSON.stringify(trace));
+
+function errorOf(read: () => unknown): unknown {
+  try {
+    read();
+  } catch (error) {
+    return error;
+  }
+  throw new Error("expected an error");
+}
 
 function agentRun(calls: number, size = 5000) {
   const big = "x".repeat(size);
@@ -104,5 +114,67 @@ describe("trace format v2", () => {
     const thinks = read.filter((e) => e.type === "enter" && e.nodeId === "think");
     const messages = (i: number) => ((thinks[i] as Trace[number]).input as { messages: unknown[] }).messages;
     expect(messages(50)[1]).toBe(messages(49)[1]);
+  });
+
+  it("rejects lines that are not objects", () => {
+    const lines = toJSONL(agentRun(1, 50).trace).split("\n");
+    for (const bad of ["null", "[1]", "[]"]) {
+      const text = [lines[0], bad, ...lines.slice(2)].join("\n");
+      expect(errorOf(() => fromJSONL(text))).toMatchObject({
+        code: "INVALID_TRACE",
+        message: "Event 1 is not an object",
+      });
+    }
+  });
+
+  it("rejects an unsupported version before reading any patch", () => {
+    const lines = toJSONL(agentRun(1, 50).trace).split("\n");
+    const head = JSON.parse(lines[0] as string);
+    const text = [
+      JSON.stringify({ ...head, meta: { ...head.meta, version: 3 } }),
+      JSON.stringify({ ...JSON.parse(lines[1] as string), inputPatch: [{ op: "move", path: "/x", from: "/y" }] }),
+      ...lines.slice(2),
+    ].join("\n");
+    expect(errorOf(() => fromJSONL(text))).toMatchObject({
+      code: "INVALID_TRACE",
+      message: "Unsupported trace version 3 (expected 1 or 2)",
+    });
+  });
+
+  it("round-trips state with keys named constructor, toString and __proto__", async () => {
+    type State = { readonly words: Readonly<Record<string, number>> };
+    const passThrough: StandardSchemaV1<State, State> = {
+      "~standard": { version: 1, vendor: "test", validate: (value) => ({ value: value as State }) },
+    };
+    const words = (entries: [string, number][]) => ({ words: Object.fromEntries(entries) });
+    const graph = createGraph(passThrough, {
+      start: "add",
+      nodes: {
+        add: (s) => words([...Object.entries(s.words), ["constructor", 1], ["toString", 2], ["__proto__", 3]]),
+        change: (s) =>
+          words(
+            Object.entries(s.words)
+              .filter(([k]) => k !== "constructor" && k !== "toString")
+              .map(([k, v]) => [k, k === "__proto__" ? v + 1 : v]),
+          ),
+        drop: (s) => words(Object.entries(s.words).filter(([k]) => k !== "__proto__")),
+      },
+      edges: [
+        { from: "add", to: "change" },
+        { from: "change", to: "drop" },
+      ],
+      endNodes: ["drop"],
+    });
+    const { trace } = await graph.run({ words: { a: 1 } });
+    const read = fromJSONL(toJSONL(trace));
+    expect(read).toEqual(plain(trace));
+    const outputs = read.filter((e) => e.type === "exit").map((e) => (e.output as State).words);
+    expect(outputs.map((w) => Object.keys(w).sort())).toEqual([
+      ["__proto__", "a", "constructor", "toString"],
+      ["__proto__", "a"],
+      ["a"],
+    ]);
+    for (const w of outputs) expect(Object.getPrototypeOf(w)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(outputs[1], "__proto__")?.value).toBe(4);
   });
 });
