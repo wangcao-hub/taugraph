@@ -310,13 +310,14 @@ function* runStep<S>(p: StepParams<S>): Effects<StepOutcome<S>> {
       }
       if (failure) throw failure.error;
       const message = `Node "${nodeId}" (step ${step}) returned a state that is not plain JSON`;
-      const json = toJson(output, message, nodeId, step);
+      const json = toJson(output, message, nodeId, step, state);
       const next = yield* validate(
         graph.schema,
         json,
         `Node "${nodeId}" (step ${step}) returned invalid state`,
         nodeId,
         step,
+        state,
       );
       log.append({ type: "exit", nodeId, step, output: next, meta: { ...meta, durationMs: Date.now() - startedAt } });
       return { kind: "exit", state: next };
@@ -440,6 +441,7 @@ function* validate<S>(
   message: string,
   nodeId?: string,
   step?: number,
+  base?: unknown,
 ): Effects<S> {
   let result = schema["~standard"].validate(value);
   if (isThenable(result)) result = (yield result) as StandardSchemaV1.Result<S>;
@@ -450,12 +452,12 @@ function* validate<S>(
       issues: result.issues,
     });
   }
-  return toJson(result.value, `${message}: validated state is not plain JSON`, nodeId, step);
+  return toJson(result.value, `${message}: validated state is not plain JSON`, nodeId, step, base);
 }
 
-export function toJson<T>(value: T, message: string, nodeId?: string, step?: number): T {
+export function toJson<T>(value: T, message: string, nodeId?: string, step?: number, base?: unknown): T {
   try {
-    return freezeJson(value);
+    return freezeJson(value, base);
   } catch (cause) {
     if (!(cause instanceof NotJsonError)) throw cause;
     throw new TaugraphError("INVALID_STATE", `${message} (${cause.message})`, { nodeId, step, cause });

@@ -15,6 +15,9 @@ export class NotJsonError extends Error {
   }
 }
 
+/** Values made by `freezeJson`: deeply frozen and checked, so they are reused instead of copied. */
+const checked = new WeakSet<object>();
+
 /**
  * Returns a deeply frozen copy of a plain-JSON value.
  *
@@ -22,41 +25,60 @@ export class NotJsonError extends Error {
  * (Date, Map, class instances, functions, bigint, NaN, cycles). This is what makes
  * an in-memory trace and a trace loaded from JSONL replay identically.
  * `undefined` object properties are kept (JSON drops them; `jsonEqual` ignores them).
+ *
+ * Parts that `freezeJson` made earlier are reused as they are, and so is every part of `base`
+ * (also made by `freezeJson`) that equals the part at the same position: consecutive states
+ * share whatever did not change, which keeps traces linear in memory.
  */
-export function freezeJson<T>(value: T): T {
-  return copy(value, "", new Set()) as T;
+export function freezeJson<T>(value: T, base?: unknown): T {
+  return copy(value, "", new Set(), base) as T;
 }
 
-function copy(value: unknown, path: string, ancestors: Set<object>): unknown {
+const isChecked = (value: unknown): value is object =>
+  typeof value === "object" && value !== null && checked.has(value);
+
+function copy(value: unknown, path: string, ancestors: Set<object>, base: unknown): unknown {
   if (value === null || typeof value === "string" || typeof value === "boolean") return value;
   if (typeof value === "number") {
     if (!Number.isFinite(value)) throw new NotJsonError(path, `non-finite number ${value}`);
     return value;
   }
   if (typeof value !== "object") throw new NotJsonError(path, `${typeof value} is not JSON`);
+  if (checked.has(value)) return value;
   if (ancestors.has(value)) throw new NotJsonError(path, "circular reference");
 
   ancestors.add(value);
-  let result: unknown;
+  const reuse = isChecked(base) ? base : undefined;
+  let result: object;
   if (Array.isArray(value)) {
-    result = value.map((item, i) => {
+    const old = Array.isArray(reuse) ? (reuse as readonly unknown[]) : undefined;
+    const items = value.map((item, i) => {
       if (item === undefined) throw new NotJsonError(`${path}[${i}]`, "undefined in array");
-      return copy(item, `${path}[${i}]`, ancestors);
+      return copy(item, `${path}[${i}]`, ancestors, old?.[i]);
     });
+    result =
+      old && old.length === items.length && items.every((item, i) => item === old[i]) ? old : Object.freeze(items);
   } else {
     const proto = Object.getPrototypeOf(value);
     if (proto !== Object.prototype && proto !== null) {
       const name = (value as { constructor?: { name?: string } }).constructor?.name ?? "object";
       throw new NotJsonError(path, `${name} is not a plain object (use strings / numbers / arrays / objects)`);
     }
+    const old = reuse && !Array.isArray(reuse) ? (reuse as Record<string, unknown>) : undefined;
     const out: Record<string, unknown> = {};
     for (const [key, item] of Object.entries(value)) {
-      out[key] = item === undefined ? undefined : copy(item, path === "" ? key : `${path}.${key}`, ancestors);
+      out[key] =
+        item === undefined ? undefined : copy(item, path === "" ? key : `${path}.${key}`, ancestors, old?.[key]);
     }
-    result = out;
+    const keys = Object.keys(out);
+    result =
+      old && keys.length === Object.keys(old).length && keys.every((k) => Object.hasOwn(old, k) && out[k] === old[k])
+        ? old
+        : Object.freeze(out);
   }
   ancestors.delete(value);
-  return Object.freeze(result);
+  checked.add(result);
+  return result;
 }
 
 /** Structural equality for JSON values. Object properties set to `undefined` count as absent. */
