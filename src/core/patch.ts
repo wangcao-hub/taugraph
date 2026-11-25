@@ -18,6 +18,20 @@ const define = (o: Record<string, unknown>, key: string, value: unknown): void =
 };
 const OPS: ReadonlySet<unknown> = new Set(["add", "remove", "replace"]);
 
+/** Like `jsonEqual`, but object keys (those with defined values) must also be in the same order. */
+function sameJson(x: unknown, y: unknown): boolean {
+  if (x === y) return true;
+  if (Array.isArray(x) && Array.isArray(y)) {
+    return x.length === y.length && x.every((item, i) => sameJson(item, y[i]));
+  }
+  if (isRecord(x) && isRecord(y)) {
+    const kx = Object.keys(x).filter((key) => own(x, key) !== undefined);
+    const ky = Object.keys(y).filter((key) => own(y, key) !== undefined);
+    return kx.length === ky.length && kx.every((key, i) => key === ky[i] && sameJson(own(x, key), own(y, key)));
+  }
+  return jsonEqual(x, y);
+}
+
 /** Operations that turn `from` into `to`; `[]` when they are equal. Object keys set to `undefined` count as absent. */
 export function diffJson(from: unknown, to: unknown): PatchOp[] {
   const ops: PatchOp[] = [];
@@ -28,7 +42,7 @@ export function diffJson(from: unknown, to: unknown): PatchOp[] {
 function walk(a: unknown, b: unknown, path: string, ops: PatchOp[]): void {
   if (a === b) return;
   if (Array.isArray(a) && Array.isArray(b)) {
-    if (b.length >= a.length && a.every((item, i) => jsonEqual(item, b[i]))) {
+    if (b.length >= a.length && a.every((item, i) => sameJson(item, b[i]))) {
       for (let i = a.length; i < b.length; i++) ops.push({ op: "add", path: `${path}/-`, value: b[i] });
       return;
     }

@@ -114,6 +114,12 @@ describe("JSON patch for trace v2", () => {
     });
   }
 
+  it("keeps the key order of an earlier array item when items are also appended", () => {
+    const from = { m: [{ a: 1, b: 2 }] };
+    const to = { m: [{ b: 2, a: 1 }, { c: 3 }] };
+    expect(JSON.stringify(applyPatch(from, diffJson(from, to)))).toBe(JSON.stringify(to));
+  });
+
   it("keeps unchanged parts and never changes the base", () => {
     const base = Object.freeze({ keep: Object.freeze({ deep: 1 }), list: Object.freeze([1]) });
     const next = applyPatch(base, [{ op: "add", path: "/list/-", value: 2 }]) as typeof base;
