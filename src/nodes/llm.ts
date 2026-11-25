@@ -2,7 +2,7 @@ import { defineNode, type MaybePromise, type Node, type RetryPolicy, type Standa
 import { andThen, issuesMessage } from "./util.js";
 
 // ---------------------------------------------------------------------------
-// Model contract. taugraph ships no provider; adapt any SDK or HTTP API to this.
+// Model contract. Adapt any SDK or HTTP API to this; taugraph/openai covers OpenAI-compatible endpoints.
 // ---------------------------------------------------------------------------
 
 /** A tool the model may call. Field names follow MCP; `inputSchema` is JSON Schema for the arguments object. */

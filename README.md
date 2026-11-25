@@ -121,7 +121,7 @@ const State = z.object({
   final: z.string().nullable().default(null),
 });
 
-// Any provider fits this contract. See examples/adapters/openai-compatible.ts.
+// Any provider fits this contract; taugraph/openai covers OpenAI-compatible endpoints.
 const model: LLMModel = {
   id: "mock:echo",
   complete: (req) => ({ content: `echo: ${textOf(req.messages.at(-1)?.content ?? "")}` }),
@@ -249,7 +249,7 @@ Every failure is a `TaugraphError` with a `code` (`INVALID_GRAPH`, `INVALID_STAT
 | `LLMNode`   | Calls an `LLMModel` (tools included), records an `llm_call` event, optionally parses JSON output with a schema. |
 | `HumanNode` | Pauses for an answer via `ctx.interrupt`, validates it with a schema, asks again if invalid.                    |
 
-`LLMNode` only defines the call contract (`{ id, complete(request, { signal }) }`); bring OpenAI, Ollama or anything else through a small adapter. An OpenAI-compatible one is in [`examples/adapters`](./examples/adapters/openai-compatible.ts). Messages can carry images; see [Images](#images).
+`LLMNode` only defines the call contract (`{ id, complete(request, { signal }) }`); bring OpenAI, Ollama or anything else through a small adapter. [`taugraph/openai`](#openai-compatible-models-taugraphopenai) covers OpenAI-compatible endpoints. Messages can carry images; see [Images](#images).
 
 Writing your own node type takes one call to `defineNode`:
 
@@ -318,7 +318,30 @@ think ──no calls, or maxRounds──▶ finish
 - Tool definitions follow MCP (`name`, `description`, `inputSchema` as JSON Schema). A tool's JSON Schema comes from `inputSchema` if given, else from `input` through [Standard JSON Schema](https://standardschema.dev/json-schema) (Zod 4, Valibot, ArkType).
 - Invalid arguments, unknown tools, unreadable arguments and thrown errors go back to the model as error results; the loop continues.
 - `maxRounds` (default 8) bounds model calls; at most 32 calls run per reply. Each tool run is a `tool_call` event.
-- Models: the call contract gained optional `tools`, `toolChoice` and `toolCalls`, and `tool` messages. An adapter that maps `role` itself needs a `tool` branch. The [OpenAI-compatible adapter](./examples/adapters/openai-compatible.ts) translates them. `pnpm example:agent` runs the whole thing. Tool results may carry images (see [Images](#images)).
+- Models: the call contract gained optional `tools`, `toolChoice` and `toolCalls`, and `tool` messages. An adapter that maps `role` itself needs a `tool` branch. The [OpenAI-compatible adapter](#openai-compatible-models-taugraphopenai) translates them. `pnpm example:agent` runs the whole thing. Tool results may carry images (see [Images](#images)).
+
+## OpenAI-compatible models (`taugraph/openai`)
+
+`openAICompatible` turns any OpenAI-compatible `/chat/completions` endpoint into an `LLMModel`: OpenAI, DeepSeek, Qwen, Kimi, Ollama, vLLM, LM Studio and others. It translates tool calls, images and reasoning, uses the global `fetch`, and adds no dependencies. The kernel and `taugraph/nodes` contain no provider code; this entry is an optional plugin, like `taugraph/agent`.
+
+```ts
+import { openAICompatible } from "taugraph/openai";
+
+const model = openAICompatible({
+  baseURL: "https://api.deepseek.com",
+  model: "deepseek-flash",
+  apiKey: process.env.DEEPSEEK_API_KEY,
+});
+```
+
+| Option            | What it does                                                                              |
+| ----------------- | ----------------------------------------------------------------------------------------- |
+| `resolveImage`    | Reads image references such as `media:abc` when a request is sent; see [Images](#images)  |
+| `reasoningParams` | Maps a reasoning level to request parameters; see [Reasoning models](#reasoning-models)   |
+| `sendReasoning`   | `false` stops sending the model's own reasoning back, for endpoints that refuse the field |
+| `fetch`           | Used instead of the global `fetch`, e.g. for a proxy, retries or tests                    |
+
+Any other provider fits the same contract through a small adapter of your own: an `LLMModel` is `{ id, complete(request, { signal }) }`.
 
 ## Images
 
@@ -339,7 +362,7 @@ const question: ChatMessage = {
 - Tools return images the same way: `run: () => ({ content: [{ type: "text", text: "the page" }, { type: "image", url: "media:shot1" }] })`.
 - An MCP tool result can be returned as it is when it holds text and image blocks; other blocks, such as audio or resources, fail the run, so convert them first.
 - For adapters, `resolveImages(messages, resolve)` turns `data:` URLs into base64 and every other URL into what `resolve` returns. An adapter that sends text only uses `textOf(m.content)`, which throws on images unless given `{ imagePlaceholder }`, so a model never answers about a picture it did not get.
-- The [OpenAI-compatible adapter](./examples/adapters/openai-compatible.ts) sends http(s) and `data:` URLs as they are and reads the rest with `resolveImage`. OpenAI's tool messages take text only, so it moves tool images into a user message right after them.
+- The [OpenAI-compatible adapter](#openai-compatible-models-taugraphopenai) sends http(s) and `data:` URLs as they are and reads the rest with `resolveImage`. OpenAI's tool messages take text only, so it moves tool images into a user message right after them.
 
 ```ts
 const model = openAICompatible({
@@ -365,7 +388,7 @@ const agent = createAgent({ model, tools, reasoning: "high" }); // every model c
 - Some providers refuse the next request of a tool loop unless the model's earlier thinking comes back unchanged: DeepSeek V4 (`reasoning_content`), Claude (signed thinking blocks) and Gemini 3 (a `thoughtSignature` on the first tool call of a step, kept in `ToolCall.signature`). The agent stores reasoning and signatures in the assistant messages it writes, so the next round sends them.
 - A signature is only valid for the model that wrote it, so every assistant message the agent writes records `model`, the `LLMModel.id`. Adapters send reasoning and signatures back only when `m.model` is their own `id`, so a replay that swaps the model never sends one model's signatures to another.
 - Assistant messages record `model`, so a replay that swaps the model diverges at the first model call that runs again, even if the new model answers the same; later steps run live and write steps stop with `WRITE_BLOCKED`.
-- The [OpenAI-compatible adapter](./examples/adapters/openai-compatible.ts) sends the level as `reasoning_effort` as it is (`"off"` as `"none"`), reads `reasoning_content` or `reasoning` from replies, and sends its own `reasoning_content` back; set `sendReasoning: false` for endpoints that refuse that field, such as Groq and Cerebras. When a provider has its own switch, or refuses a level, map levels in `reasoningParams`:
+- The [OpenAI-compatible adapter](#openai-compatible-models-taugraphopenai) sends the level as `reasoning_effort` as it is (`"off"` as `"none"`), reads `reasoning_content` or `reasoning` from replies, and sends its own `reasoning_content` back; set `sendReasoning: false` for endpoints that refuse that field, such as Groq and Cerebras. When a provider has its own switch, or refuses a level, map levels in `reasoningParams`:
 
 ```ts
 // DeepSeek V4: a thinking switch; it maps the levels itself

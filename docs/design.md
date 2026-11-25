@@ -75,6 +75,10 @@ Images can be references (`url: "media:abc"`) that the adapter reads at call tim
 
 Thinking comes back as readable text with an optional opaque `signature`, not as provider data, so traces stay readable. Signatures are bound to the model that made them, and replay can swap the model, so every assistant message the agent writes records `model` and adapters send signatures only to that model.
 
+## `taugraph/openai` is a plugin, not an example
+
+The OpenAI-compatible adapter started in `examples/` so the kernel would stay free of provider code. It was then copied into taugraph-mcp and into an app built on taugraph: three copies of the same tool-call, image and reasoning translation to keep in step. It needs nothing but `fetch`, so it now ships as an optional entry point next to `taugraph/agent`. The kernel and `taugraph/nodes` still contain no provider code, and an app that talks to another provider never loads it.
+
 ## `LLMNode` takes a model contract, not a callback
 
 `LLMNode(async (s) => await client.chat(...))` would hide the call from the trace. `LLMNode({ model, prompt, update })` lets the node record the exact request and response as an `llm_call` event, and lets replay swap `model` without touching prompt logic. The node stays synchronous when the model is, so mock models work in `runSync`.

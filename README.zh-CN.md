@@ -121,7 +121,7 @@ const State = z.object({
   final: z.string().nullable().default(null),
 });
 
-// 任何模型提供方都能适配这个契约，参见 examples/adapters/openai-compatible.ts
+// 任何模型提供方都能适配这个契约；OpenAI 兼容接口直接用 taugraph/openai
 const model: LLMModel = {
   id: "mock:echo",
   complete: (req) => ({ content: `echo: ${textOf(req.messages.at(-1)?.content ?? "")}` }),
@@ -249,7 +249,7 @@ graph.replay(trace, { overrides?, mode?: "recorded" | "live", allowWrites? })
 | `LLMNode`   | 调用 `LLMModel`（含工具调用），记录 `llm_call` 事件，可选用 schema 解析 JSON 结构化输出 |
 | `HumanNode` | 通过 `ctx.interrupt` 暂停等待回答，用 schema 校验，不合法就再问一次                     |
 
-`LLMNode` 只定义调用契约（`{ id, complete(request, { signal }) }`），OpenAI、Ollama 等通过小适配器接入。[`examples/adapters`](./examples/adapters/openai-compatible.ts) 里有一个 OpenAI 兼容适配器。消息可以带图片，见[图片](#图片)。
+`LLMNode` 只定义调用契约（`{ id, complete(request, { signal }) }`），OpenAI、Ollama 等通过小适配器接入。[`taugraph/openai`](#openai-兼容模型taugraphopenai) 负责对接 OpenAI 兼容接口。消息可以带图片，见[图片](#图片)。
 
 自定义节点类型只需要一次 `defineNode`：
 
@@ -318,7 +318,30 @@ think ──没有调用，或到了 maxRounds──▶ finish
 - 工具定义沿用 MCP 的字段（`name`、`description`，`inputSchema` 是 JSON Schema）。给了 `inputSchema` 就用它，否则通过 [Standard JSON Schema](https://standardschema.dev/json-schema) 从 `input` 生成（Zod 4、Valibot、ArkType）。
 - 参数不合 schema、工具不存在、参数读不懂、工具抛错，都作为错误结果交回模型，循环继续。
 - `maxRounds`（默认 8）限制模型调用次数；一次回复最多执行 32 个调用。每次工具执行是一条 `tool_call` 事件。
-- 模型接口新增可选的 `tools`、`toolChoice`、`toolCalls`，以及 `tool` 消息（自己转换 `role` 的适配器要补一个 `tool` 分支）；[OpenAI 兼容适配器](./examples/adapters/openai-compatible.ts) 负责转换。`pnpm example:agent` 能把整套跑一遍。工具结果可以带图片（见[图片](#图片)）。
+- 模型接口新增可选的 `tools`、`toolChoice`、`toolCalls`，以及 `tool` 消息（自己转换 `role` 的适配器要补一个 `tool` 分支）；[OpenAI 兼容适配器](#openai-兼容模型taugraphopenai) 负责转换。`pnpm example:agent` 能把整套跑一遍。工具结果可以带图片（见[图片](#图片)）。
+
+## OpenAI 兼容模型（`taugraph/openai`）
+
+`openAICompatible` 把任何 OpenAI 兼容的 `/chat/completions` 接口变成一个 `LLMModel`：OpenAI、DeepSeek、Qwen、Kimi、Ollama、vLLM、LM Studio 等。它负责转换工具调用、图片和思考，用全局的 `fetch`，不引入任何依赖。内核和 `taugraph/nodes` 不带任何服务商代码；这个入口和 `taugraph/agent` 一样是可选插件。
+
+```ts
+import { openAICompatible } from "taugraph/openai";
+
+const model = openAICompatible({
+  baseURL: "https://api.deepseek.com",
+  model: "deepseek-flash",
+  apiKey: process.env.DEEPSEEK_API_KEY,
+});
+```
+
+| 选项              | 作用                                                            |
+| ----------------- | --------------------------------------------------------------- |
+| `resolveImage`    | 发请求时读取 `media:abc` 这类图片引用，见[图片](#图片)          |
+| `reasoningParams` | 把思考档位换成请求参数，见[思考型模型](#思考型模型)             |
+| `sendReasoning`   | 设为 `false` 时不再把模型自己的思考发回，用于拒收这个字段的接口 |
+| `fetch`           | 代替全局的 `fetch`，用于代理、重试或测试                        |
+
+其他服务商写一个小适配器就能接入同一个契约：`LLMModel` 就是 `{ id, complete(request, { signal }) }`。
 
 ## 图片
 
@@ -339,7 +362,7 @@ const question: ChatMessage = {
 - 工具用同样的方式返回图片：`run: () => ({ content: [{ type: "text", text: "the page" }, { type: "image", url: "media:shot1" }] })`。
 - MCP 工具的结果只含文字和图片块时可以原样返回；音频、资源等其他块会让运行失败，要先转换。
 - 写适配器时，`resolveImages(messages, resolve)` 把 `data:` 地址拆成 base64，其他地址换成 `resolve` 的返回值。只能发文字的适配器用 `textOf(m.content)`；遇到图片它会报错，除非传了 `{ imagePlaceholder }`，这样模型不会对一张没收到的图作答。
-- [OpenAI 兼容适配器](./examples/adapters/openai-compatible.ts) 原样发送 http(s) 和 `data:` 地址，其他地址交给 `resolveImage` 读取。OpenAI 的 `tool` 消息只能放文字，所以工具返回的图片会放进紧跟其后的一条 `user` 消息。
+- [OpenAI 兼容适配器](#openai-兼容模型taugraphopenai) 原样发送 http(s) 和 `data:` 地址，其他地址交给 `resolveImage` 读取。OpenAI 的 `tool` 消息只能放文字，所以工具返回的图片会放进紧跟其后的一条 `user` 消息。
 
 ```ts
 const model = openAICompatible({
@@ -365,7 +388,7 @@ const agent = createAgent({ model, tools, reasoning: "high" }); // 这次运行�
 - 有几家要求工具循环的下一次请求原样带回模型之前的思考，否则拒绝请求：DeepSeek V4（`reasoning_content`）、Claude（带签名的思考块）、Gemini 3（一步里第一个工具调用上的 `thoughtSignature`，存在 `ToolCall.signature`）。agent 把思考和签名存进它写的 assistant 消息，下一轮自动带上。
 - 签名只对写它的模型有效，所以 agent 写的每条 assistant 消息都记下 `model`，也就是 `LLMModel.id`。适配器只在 `m.model` 等于自己的 `id` 时发回思考和签名，回放时换了模型也不会把一个模型的签名发给另一个模型。
 - assistant 消息记有 `model`，所以换模型回放时，从第一次重新执行的模型调用起状态就和录制不同，哪怕新模型回答一样；之后的步骤实时执行，写操作步骤会以 `WRITE_BLOCKED` 停下。
-- [OpenAI 兼容适配器](./examples/adapters/openai-compatible.ts) 把档位原样作为 `reasoning_effort` 发出（`"off"` 写成 `"none"`），从回复里读 `reasoning_content` 或 `reasoning`，并把自己的 `reasoning_content` 发回；对不接受这个字段的服务（如 Groq 和 Cerebras）设 `sendReasoning: false`。服务有自己的开关、或不接受某一档时，在 `reasoningParams` 里换算档位：
+- [OpenAI 兼容适配器](#openai-兼容模型taugraphopenai) 把档位原样作为 `reasoning_effort` 发出（`"off"` 写成 `"none"`），从回复里读 `reasoning_content` 或 `reasoning`，并把自己的 `reasoning_content` 发回；对不接受这个字段的服务（如 Groq 和 Cerebras）设 `sendReasoning: false`。服务有自己的开关、或不接受某一档时，在 `reasoningParams` 里换算档位：
 
 ```ts
 // DeepSeek V4：一个思考开关，档位由它自己换算
