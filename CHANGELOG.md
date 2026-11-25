@@ -4,6 +4,15 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Changed
+
+- Trace format version 2: `toJSONL` writes each `input` / `output` as a JSON Patch against a base value when the patch is under 4096 characters or not longer than the value, so traces grow with what changed instead of with the square of the run. `fromJSONL`, `resume` and `replay` read versions 1 and 2. In memory, events keep their shape, and consecutive states share the parts that did not change.
+
+### Added
+
+- `taugraph/file`: `fileStore(dir, { durability })` stores one JSONL file per run, appended before each step continues; `load` ignores a half-written last line, and continuing a run cuts it off; a lock file per run keeps two processes on one machine from writing the same run; `list()` reports `running`, `interrupted`, `paused`, `completed` or `failed`. `durability` is `"writes"` (default: fsync before write steps, at pauses and at the end), `"every"` or `"none"`.
+- `runStatus(trace)`, `createTraceEncoder(prefix)`, `toJSONL(trace, { from })` and `fromJSONL(text, { tornTail: "drop" })`.
+
 ## [0.3.0] - 2026-11-25
 
 Tool calling, images and reasoning models in the model contract, plus two plugin entry points: `taugraph/agent` (the model ↔ tools loop as a graph) and `taugraph/openai` (an adapter for any OpenAI-compatible endpoint).

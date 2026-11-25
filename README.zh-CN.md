@@ -205,6 +205,8 @@ run_start → enter → [llm_call | tool_call | ...] → exit → enter → paus
 
 `enter` 携带输入状态，`exit` 携带输出状态，所以事件流同时也是快照序列（兼顾 Pi 的事件流和 LangGraph 的 snapshot）。节点用 `ctx.trace.append` 追加自己的事件，内核事件类型是保留的。
 
+相邻的快照共享没有变化的部分，内存里如此，写到磁盘上也如此：`toJSONL` 写出 v2 格式，每个快照存成相对上一个快照的改动，所以 trace 随变化的多少增长，而不是随状态的大小增长。
+
 `run(input, { onEvent })` 会在运行继续之前把每个事件交给你的 sink。sink 抛错时运行以 `SINK_FAILED` 停止，保证没有哪一步是在没写日志的情况下执行的。完整格式见 [docs/trace-format.md](./docs/trace-format.md)。
 
 ### 暂停与恢复
@@ -408,6 +410,31 @@ const model = openAICompatible({
   reasoningParams: deepseek,
 });
 ```
+
+## 存成文件（`taugraph/file`）
+
+`fileStore(dir)` 给每个 run 存一个 JSONL 文件，每个事件都在 run 走下一步之前追加写入。崩溃后找出没跑完的 run，接着跑：
+
+```ts
+import { fileStore } from "taugraph/file";
+
+const store = fileStore("./runs");
+await graph.run(input, { onEvent: store.sink });
+
+// 重启以后
+for (const run of store.list()) {
+  if (run.status === "interrupted") await graph.resume(store.load(run.runId)!, undefined, { onEvent: store.sink });
+}
+```
+
+- `list()` 给出五种状态：`running`（有活着的进程持有这个 run 的锁）、`interrupted`（没有结束，也没有进程在写）、`paused`、`completed`、`failed`。
+- 崩溃可能留下写了一半的最后一行。`load` 会忽略它，接着跑之前存储会把它截掉。正在执行的写操作步骤会以 `UNKNOWN_OUTCOME` 停下，不会再跑一遍。
+- `durability` 决定什么时候 `fsync`：`"writes"`（默认）在写操作步骤开始前、暂停时和结束时；`"every"` 每个事件之后；`"none"` 从不。用 `"writes"` 时，断电可能丢掉只读步骤，重跑它们是安全的，但不会让写操作步骤跑两遍。
+- 写入期间每个 run 有一个锁文件，两个进程不能同时追加同一个 run。已经退出的进程留下的锁会被接管。
+- 锁只在同一台机器（同一个 pid 命名空间）的进程之间有效。共享同一个卷的容器看不到彼此的进程，所以不要让两个容器写同一个目录。
+- 在同一个进程里，锁能区分同一线程里的不同存储，在 Node 上还能区分 worker 线程。Bun 和 Deno 上它没法区分 worker 线程，所以在那里一个目录只从一个线程写。用 `worker.terminate()` 停掉的 worker 会一直占着它的锁，直到进程退出。
+- 进程如果死在不巧的时刻，可能留下 `<runId>.lock.takeover`，或者一个空的 `<runId>.lock`（`list()` 会把这个 run 报成 `running`）。报错里写明了是哪个文件；确认没有进程在写这个 run 后删掉它。
+- 只用 `node:fs`（Node、Bun、Deno），不引入依赖。run id 只能包含字母、数字、`_`、`-` 和 `.`（不能打头），最长 128 个字符。
 
 ## 集成
 

@@ -5,12 +5,12 @@
 //     ▲  └──(no docs, attempts < 3)──▶ rewrite ──▶ search
 //     └──(no docs, attempts >= 3)──▶ giveUp (end)
 //
-// The trace is streamed to examples/out/<runId>.jsonl as it is written, then replayed
+// The trace is streamed to examples/out/<runId>.jsonl by fileStore as it is written, then replayed
 // with a different model; retrieval is reused from the recording, not re-executed.
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { z } from "zod";
-import { createGraph, diffTraces, fromJSONL, type RunContext } from "../src/index.js";
+import { fileStore } from "../src/file/index.js";
+import { createGraph, diffTraces, type RunContext } from "../src/index.js";
 import { CodeNode, type LLMModel, LLMNode, textOf } from "../src/nodes/index.js";
 import { modelFromEnv } from "./adapters/openai-compatible.js";
 
@@ -94,25 +94,16 @@ const graph = createGraph(schema, {
 });
 
 // --- Run, streaming the append-only log to disk.
-const outDir = join(import.meta.dirname, "out");
-mkdirSync(outDir, { recursive: true });
-let file = "";
-const result = await graph.run(
-  { question: "What is agent orchestration?" },
-  {
-    onEvent: (event) => {
-      file ||= join(outDir, `${event.runId}.jsonl`);
-      appendFileSync(file, `${JSON.stringify(event)}\n`);
-    },
-  },
-);
+const store = fileStore(join(import.meta.dirname, "out"));
+const result = await graph.run({ question: "What is agent orchestration?" }, { onEvent: store.sink });
 
 console.log("path:   ", result.path.join(" -> "));
 console.log("answer: ", result.state.answer);
-console.log("trace:  ", file);
+console.log("trace:  ", join(store.dir, `${result.runId}.jsonl`));
 
 // --- Load the trace back from disk and replay it with a different model.
-const recorded = fromJSONL(readFileSync(file, "utf8"));
+const recorded = store.load(result.runId);
+if (!recorded) throw new Error("the trace was not stored");
 const replayed = await graph.replay(recorded, { overrides: { answer: answerNode(conciseModel) } });
 
 console.log("\nreplay with mock:concise");

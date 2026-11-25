@@ -57,6 +57,12 @@ The same function recovers a trace that ended mid-run, for example after a crash
 
 `onEvent` is called before the run continues, and a sink failure stops the run with `SINK_FAILED`. Otherwise a step could run, perhaps a write, after the event that announced it was lost, and the stored trace could no longer be resumed correctly. The sink is synchronous to keep `runSync` possible; buffer in the sink if your storage is asynchronous and you accept the weaker guarantee.
 
+## Traces grow with what changed
+
+Every step records its full input and output state, which makes replay and resume simple. Stored naively, that grows with the square of the run: an agent that appends one message per step stores the whole conversation twice per step, and every model call stores its request again. Two layers keep it linear without changing how traces are read. In memory, `freezeJson` reuses what it froze before, and equal parts of the previous state, so consecutive snapshots share structure. On disk, format v2 writes each snapshot as a JSON Patch against its base, and `fromJSONL` rebuilds full events. Making events themselves hold patches would be smaller still, but every reader of `event.input` would need a helper.
+
+`taugraph/file` locks each run with a file holding the writer's process id, so a crashed process's lock can be told apart from a live one and a restart knows which runs to continue. A process id only means something on one machine, and a restarted container can get its old one back, so a lock with this process's own id counts as live only if it was written after this process started. By default the store fsyncs before a write step runs, at pauses and at the end, but not after read steps: losing a read step to a power cut only means running it again, while losing the record of a started write could repeat it.
+
 ## The tool loop is a graph, not a node
 
 `createAgent` could have been one node that loops over model and tool calls internally. Every guarantee would then apply to the whole loop only: replay would reuse or rerun all of it, a single write tool would make the whole loop a write node, and an approval would rerun every call before it. As a graph with one step per model call and one per tool call, the existing rules land on exactly one call each, and write tools get their own `act_write` node so `effect: "write"` stays a static property of a node. Calls from one reply run one after another; running them in parallel waits for parallel nodes.

@@ -1,4 +1,4 @@
-# Trace format, version 1
+# Trace format, version 2
 
 A trace is the complete, append-only record of one run. It is an array of events in memory and JSON Lines on disk (`toJSONL` / `fromJSONL`): one event per line, in `seq` order. A paused run and its resumptions share one runId and one trace.
 
@@ -26,7 +26,7 @@ Only the kernel writes these. `ctx.trace.append` rejects them.
 
 | type        | fields                                                                                                                                                                                                                                                                                               |
 | ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `run_start` | `input`: raw run input. `meta`: `format: "taugraph.trace"`, `version: 1`, `start`, and for replays `replayOf` (source runId) and `replayMode`.                                                                                                                                                       |
+| `run_start` | `input`: raw run input. `meta`: `format: "taugraph.trace"`, `version: 2`, `start`, and for replays `replayOf` (source runId) and `replayMode`.                                                                                                                                                       |
 | `enter`     | `nodeId`, `step`, `input`: state the node receives. `meta`: `attempt`, `source` (`live` \| `override` \| `recorded`), `kind`, `effect`, `recovered: true` when restarted after a crash, and `recordedFrom: { runId, seq }` when `source` is `recorded`.                                              |
 | `exit`      | `nodeId`, `step`, `output`: validated new state. `meta`: same as `enter` plus `durationMs`.                                                                                                                                                                                                          |
 | `error`     | `nodeId`, `step`. `meta`: `attempt`, `source`, `code`, `message`, `willRetry`.                                                                                                                                                                                                                       |
@@ -83,6 +83,19 @@ run_end(completed)
 
 `graph.replay(trace)` starts a new run (new `runId`) from `run_start.input`. In `recorded` mode, the recorded output of step _n_ is reused when the node at step _n_ is not overridden, has the same id, and receives a state deep-equal to the recorded `enter.input`. Reused outputs are validated against the current schema again, so schema drift is caught. In both modes, a live step that receives its recorded input state gets the recorded `resume` values again. A `write` node that would run live fails with `WRITE_BLOCKED` unless `allowWrites` is set; overriding it with a node that is not `write` avoids this.
 
+## Encoding (version 2)
+
+`toJSONL` writes one event per line. Events keep their shape in memory; on disk, an `input` or `output` field may be written as `inputPatch` / `outputPatch`, a JSON Patch (RFC 6902, only `add`, `remove` and `replace`, with `/-` to append to an array) against a base value:
+
+| field                           | base                                                                                           |
+| ------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `run_start.input`               | none, always written in full                                                                   |
+| `enter.input`, `run_end.output` | the current state: the `run_start` input until the first `exit`, then the latest `exit` output |
+| `exit.output`                   | the latest `enter.input` of the same step                                                      |
+| any other field                 | the same field of the previous event with the same `type` and `nodeId`                         |
+
+`toJSONL` uses the patch when it is shorter than 4096 characters or not longer than the full value; `[]` means equal to the base. Readers check patches strictly: `add` into an array must use `/-`, `replace` and `remove` need the key or index to exist, only an object's own keys count, `__proto__` is an ordinary key, and the whole value (path `""`) can be replaced but not removed. `fromJSONL` applies patches in order and returns full events. `toJSONL(trace, { from })` writes the events from `from` on with earlier events as bases, so chunks written that way concatenate into a valid file; `createTraceEncoder(prefix)` does the same one event at a time for a store. `fromJSONL(text, { tornTail: "drop" })` drops a last line that a crash cut short (no final newline, not valid JSON); any other broken line is `INVALID_TRACE`.
+
 ## Versioning
 
-`meta.version` on `run_start` is bumped on any breaking change to this format. `fromJSONL` and `replay` reject versions they do not understand. Additive changes, such as new event types or new `meta` fields, do not bump the version; consumers should ignore what they do not know.
+`meta.version` on `run_start` is bumped on any breaking change to this format. Version 2 added patches; `fromJSONL` reads versions 1 and 2 and rejects others, and `replay` and `resume` accept both. `toJSONL` writes version 2, also for a trace read from version 1. A file started by an older writer and continued by a newer one may mix full and patched lines; readers handle patch fields wherever they appear. Additive changes, such as new event types or new `meta` fields, do not bump the version; consumers should ignore what they do not know.

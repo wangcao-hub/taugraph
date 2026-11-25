@@ -205,6 +205,8 @@ run_start → enter → [llm_call | tool_call | ...] → exit → enter → paus
 
 `enter` carries the input state, `exit` the output state, so the stream doubles as a sequence of snapshots. Nodes add their own events with `ctx.trace.append`. Kernel event types are reserved.
 
+Consecutive snapshots share whatever did not change, in memory and on disk: `toJSONL` writes format v2, which stores each snapshot as a patch against the one before, so a trace grows with what changed rather than with the size of the state.
+
 `run(input, { onEvent })` hands every event to your sink before the run continues. If the sink throws, the run stops with `SINK_FAILED`, so no step runs without being logged. Full spec: [docs/trace-format.md](./docs/trace-format.md).
 
 ### Pause and resume
@@ -408,6 +410,31 @@ const model = openAICompatible({
   reasoningParams: deepseek,
 });
 ```
+
+## Saving to files (`taugraph/file`)
+
+`fileStore(dir)` keeps one JSONL file per run and appends every event before the run takes its next step. After a crash, find the runs that did not finish and continue them:
+
+```ts
+import { fileStore } from "taugraph/file";
+
+const store = fileStore("./runs");
+await graph.run(input, { onEvent: store.sink });
+
+// after a restart
+for (const run of store.list()) {
+  if (run.status === "interrupted") await graph.resume(store.load(run.runId)!, undefined, { onEvent: store.sink });
+}
+```
+
+- `list()` reports `running` (a live process holds the run's lock), `interrupted` (no end and nobody writing it), `paused`, `completed` or `failed`.
+- A crash can leave the last line half-written. `load` ignores it, and the store cuts it off before it continues the run. A write step that was running stops with `UNKNOWN_OUTCOME` instead of running again.
+- `durability` decides when to `fsync`: `"writes"` (default) before a write step runs, at a pause and at the end; `"every"` after each event; `"none"` never. With `"writes"`, a power cut can lose read steps, which are safe to run again, but cannot make a write step run twice.
+- Each run has a lock file while it is written, so two processes cannot append to the same run. A lock left by a process that died is taken over.
+- The lock works between processes on one machine (one pid namespace). Containers that share a volume cannot see each other's processes, so do not let two of them write the same directory.
+- Within one process, the lock keeps stores in the same thread apart, and on Node also worker threads. Bun and Deno give it no way to tell worker threads apart, so write a directory from one thread there. A worker stopped with `worker.terminate()` keeps its locks until the process exits.
+- A process that dies at the wrong moment can leave `<runId>.lock.takeover` or an empty `<runId>.lock` (which `list()` reports as `running`). The error names the file; remove it if no process is writing the run.
+- It uses `node:fs` (Node, Bun, Deno) and adds no dependencies. Run ids may contain letters, digits, `_`, `-` and `.` (not first), up to 128 characters.
 
 ## Integrations
 
