@@ -18,13 +18,14 @@ Traces grow linearly instead of with the square of the run, in memory and in JSO
 - `fromJSONL` returns frozen `input` / `output` values; events and their `meta` stay plain objects.
 - `freezeJson` (state and payload checks) now rejects arrays with holes (`INVALID_STATE`; before, holes became `null` on disk), and a `__proto__` key in state is kept as an ordinary key.
 - `taugraph/openai` throws `HTTPError` (with `status`, `url` and `retryAfterMs`) instead of a plain `Error` for responses outside 2xx. The message is unchanged. `String(error)` now starts with `HTTPError:`.
+- Types: `TaugraphErrorCode` gains `TIMEOUT`, so an exhaustive `switch` over it needs a branch, and `RunContext.meta` gains `idempotencyKey`, so a hand-built `ctx` in tests needs one.
 
 ### Added
 
 - `taugraph/file`: `fileStore(dir, { durability })` stores one JSONL file per run, appended before each step continues; `load` ignores a half-written last line, and continuing a run cuts it off; a lock file per run keeps two processes on one machine from writing the same run; `list()` reports `running`, `interrupted`, `paused`, `completed` or `failed`. `durability` is `"writes"` (default: fsync before write steps, at pauses and at the end), `"every"` or `"none"`.
 - `runStatus(trace)`, `createTraceEncoder(prefix)`, `toJSONL(trace, { from })` and `fromJSONL(text, { tornTail: "drop" })`.
 - Retry policy: `backoff`, `retryOn` and `idempotent` on `RetryPolicy`; `isRetryable(error)`, the default rule; `ctx.meta.idempotencyKey` (`<runId>:<step>`); `delayMs` in `error` events.
-- Timeouts: `timeoutMs` on nodes (`defineNode`, `CodeNode`, `LLMNode`), on `createAgent` for each model call, and on agent tools. An attempt that times out fails with the new code `TIMEOUT`, which is retryable, and its `ctx.signal` aborts. A `write` node that stopped on a timeout or an abort has `outcome: "unknown"` in its `error` event. A read tool that times out answers the model with an error; a write tool fails the run.
+- Timeouts: `timeoutMs` on nodes (`defineNode`, `CodeNode`, `LLMNode`), on `createAgent` for each model call, and on agent tools. An attempt that times out fails with the new code `TIMEOUT`, which is retryable, and its `ctx.signal` aborts. A `write` node's attempt that ends in a timeout or an abort has `outcome: "unknown"` in its `error` event. A read tool that times out answers the model with an error; a write tool fails the run.
 - Async sinks: `onEvent` may return a Promise. `run` awaits it after each kernel event and awaits the events a node appended before the step's `exit`; calls never overlap; a rejection stops the run with `SINK_FAILED`. `runSync` refuses an async sink with `ASYNC_IN_SYNC_RUN`.
 - `taugraph/openai`: `tokenLimit: "max_completion_tokens"` for OpenAI's reasoning models.
 

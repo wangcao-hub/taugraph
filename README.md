@@ -248,7 +248,7 @@ CodeNode(fetchPrices, { retry: { maxAttempts: 4 }, timeoutMs: 10_000 });
 ```
 
 - **What is retried.** By default `isRetryable(error)` decides. Kernel errors that another attempt cannot fix (`INVALID_STATE`, `ABORTED`, `SINK_FAILED`, ...) are not retried, and neither are HTTP 4xx errors other than 408, 409, 425 and 429, read from a numeric `status` on the error or its `cause` chain. Everything else is retried, including errors it knows nothing about. Pass `retryOn(error)` to decide yourself; it gets the error the node threw.
-- **How long it waits.** Exponential backoff: 500 ms, twice as long each time, at most 30 s, minus up to half at random (`backoff: { initialMs, factor, maxMs, jitter }`, or `false` to retry at once). A `retryAfterMs` on the error, which `taugraph/openai` reads from `Retry-After`, makes it wait at least that long. `run` waits with a timer and stops at once when aborted; `runSync` blocks the thread, and fails with `ASYNC_IN_SYNC_RUN` where it may not (a browser's main thread). Each failed attempt is an `error` event with `willRetry` and `delayMs`.
+- **How long it waits.** Exponential backoff: 500 ms, twice as long each time, at most 30 s, minus up to half at random (`backoff: { initialMs, factor, maxMs, jitter }`, or `false` to retry at once). A `retryAfterMs` on the error, which `taugraph/openai` reads from `Retry-After`, makes it wait at least that long. `run` waits with a timer and stops at once when aborted; `runSync` blocks the thread, and fails with `ASYNC_IN_SYNC_RUN` where it may not (a browser's main thread). Each failed attempt is an `error` event with `willRetry`, and `delayMs` when it will retry.
 - **Write nodes.** A `write` node with `retry` must set `idempotent: true`, or `defineNode` throws: a repeated order is a second order. `ctx.meta.idempotencyKey` (`<runId>:<step>`) is the same for every attempt of a step and after a crash; pass it to the API (as an `Idempotency-Key` header, say) so repeats are safe.
 - **Timeouts.** `timeoutMs` on a node fails the attempt with `TIMEOUT` when its Promise has not settled in time, and aborts `ctx.signal`. `TIMEOUT` is retried like other errors. Synchronous code cannot be interrupted. When a `write` node stops on a timeout or an abort, its `error` event says `outcome: "unknown"`: the effect may or may not have happened.
 
@@ -359,7 +359,7 @@ const model = openAICompatible({
 
 The model's `id` is `openai-compatible:<model>`. It is recorded in every `llm_call` event, and assistant messages with that `model` count as this model's own when reasoning is sent back.
 
-A response outside 2xx throws `HTTPError` with `status`, `url` and `retryAfterMs` (read from `Retry-After`), so an `LLMNode` with `retry` retries 429 and 5xx, waiting at least as long as `Retry-After` asks, and gives up on other 4xx at once.
+A response outside 2xx throws `HTTPError` with `status`, `url` and `retryAfterMs` (read from `Retry-After`), so an `LLMNode` with `retry` retries 408, 409, 425, 429 and 5xx, waiting at least as long as `Retry-After` asks, and gives up on other 4xx at once.
 
 Any other provider fits the same contract through a small adapter of your own: an `LLMModel` is `{ id, complete(request, { signal }) }`.
 

@@ -53,7 +53,7 @@ Which errors to retry is read from data, not from error classes: a numeric `stat
 
 ## Timeouts stop the wait and abort the signal
 
-A node's `timeoutMs` does two things at once. The kernel stops waiting for the node's Promise, which bounds the run even when the node ignores its signal, and it aborts `ctx.signal`, which lets a well-behaved node cancel its request. JavaScript cannot interrupt synchronous code, so the limit only covers Promises. A write that timed out may still complete on the other side, so its `error` event says `outcome: "unknown"` and the run fails rather than guessing. The agent applies the same rule to tools: a read tool's timeout is one more error result for the model, a write tool's timeout stops the run.
+A node's `timeoutMs` does two things at once. The kernel stops waiting for the node's Promise, which bounds the run even when the node ignores its signal, and it aborts `ctx.signal`, which lets a well-behaved node cancel its request. JavaScript cannot interrupt synchronous code, so the limit only covers Promises. A write that timed out may still complete on the other side, so its `error` event says `outcome: "unknown"`, and unless the node is declared idempotent the run fails rather than guessing. The agent applies the same rule to tools: a read tool's timeout is one more error result for the model, a write tool's timeout stops the run.
 
 ## The trace is the checkpoint
 
