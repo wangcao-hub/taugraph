@@ -26,6 +26,14 @@ const weather = tool({
   run: ({ city }) => `${city}: 晴，-2~5°C`,
 });
 
+const hang = () => new Promise<never>(() => {});
+const busy = (ms: number) => {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    // keep the thread busy
+  }
+};
+
 describe("createAgent", () => {
   it("answers without tools in one round", async () => {
     const model = scripted([{ content: "你好" }]);
@@ -422,5 +430,86 @@ describe("agentStateSchema", () => {
       [["messages", 1, "reasoning"], "expected an array"],
       [["pending", 0, "signature"], "expected a string"],
     ]);
+  });
+});
+
+describe("timeouts", () => {
+  it("answers the model with an error when a read tool takes too long", async () => {
+    let signal: AbortSignal | undefined;
+    const slow = tool({
+      name: "slow",
+      timeoutMs: 20,
+      run: (_args, ctx) => {
+        signal = ctx.signal;
+        return hang();
+      },
+    });
+    const model = scripted([{ content: "", toolCalls: [call("c1", "slow")] }, { content: "sorry" }]);
+    const { state, trace } = await createAgent({ model, tools: [slow] }).run(ask("go"));
+    expect(state.final).toBe("sorry");
+    expect(state.messages[2]).toEqual({
+      role: "tool",
+      toolCallId: "c1",
+      content: 'Tool "slow" timed out after 20ms',
+      isError: true,
+    });
+    expect(trace.find((e) => e.type === "tool_call")?.meta).toMatchObject({ error: true });
+    expect(signal?.aborted).toBe(true);
+  });
+
+  it("fails the run when a write tool takes too long, since the write may have happened", async () => {
+    const pay = tool({ name: "pay", effect: "write", timeoutMs: 20, run: () => hang() });
+    const model = scripted([{ content: "", toolCalls: [call("c1", "pay")] }]);
+    const error = await createAgent({ model, tools: [pay] })
+      .run(ask("pay"))
+      .then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+    expect(isTaugraphError(error) && error.code).toBe("TIMEOUT");
+    if (!isTaugraphError(error)) return;
+    expect(error.message).toBe('Node "act_write" (step 1): Tool "pay" timed out after 20ms');
+    expect(error.trace?.find((e) => e.type === "error")).toMatchObject({
+      nodeId: "act_write",
+      meta: { code: "TIMEOUT", outcome: "unknown", willRetry: false },
+    });
+    expect(error.trace?.some((e) => e.type === "tool_call")).toBe(false);
+    expect(model.requests).toHaveLength(1);
+  });
+
+  it("limits each model call", async () => {
+    const model: LLMModel = { id: "mock:slow", complete: () => hang() };
+    const error = await createAgent({ model, timeoutMs: 20 })
+      .run(ask("hi"))
+      .then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+    expect(isTaugraphError(error) && error.code).toBe("TIMEOUT");
+    expect((error as Error).message).toBe('Node "think" (step 0) timed out after 20ms');
+  });
+
+  it("cannot interrupt a synchronous tool", () => {
+    const quick = tool({
+      name: "quick",
+      timeoutMs: 1,
+      run: () => {
+        busy(10);
+        return "done";
+      },
+    });
+    const model = scripted([{ content: "", toolCalls: [call("c1", "quick")] }, { content: "ok" }]);
+    const { state } = createAgent({ model, tools: [quick] }).runSync(ask("go"));
+    expect(state.messages[2]).toMatchObject({ role: "tool", content: "done" });
+  });
+
+  it("refuses timeouts that are not whole milliseconds", () => {
+    expect(() => createAgent({ model: scripted([]), timeoutMs: 0 })).toThrow(
+      "createAgent: timeoutMs must be an integer from 1 to 2147483647, got 0",
+    );
+    const odd = tool({ name: "odd", timeoutMs: 1.5, run: () => "" });
+    expect(() => createAgent({ model: scripted([]), tools: [odd] })).toThrow(
+      'createAgent: tool "odd" has timeoutMs 1.5; use an integer from 1 to 2147483647',
+    );
   });
 });

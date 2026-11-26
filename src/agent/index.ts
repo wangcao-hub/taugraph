@@ -13,6 +13,7 @@ import {
   type RetryPolicy,
   type RunContext,
   type StandardSchemaV1,
+  TaugraphError,
 } from "../index.js";
 import {
   type ChatMessage,
@@ -25,7 +26,7 @@ import {
   type ToolSpec,
 } from "../nodes/index.js";
 import { type AgentInput, type AgentState, agentStateSchema, checkContent } from "./state.js";
-import { andThen, issuesText, settle } from "./util.js";
+import { andThen, deadline, issuesText, isThenable, settle } from "./util.js";
 
 export { type AgentInput, type AgentState, type AgentStop, agentStateSchema } from "./state.js";
 
@@ -50,6 +51,12 @@ export interface Tool<A = ToolArgs> {
   readonly inputSchema?: Readonly<Record<string, unknown>>;
   /** `"write"` for tools that change the outside world: they run in a write step, never repeated by replay. */
   readonly effect?: Effect;
+  /**
+   * Milliseconds one run may take; then its `signal` aborts. A read tool that takes longer answers the model with an
+   * error and the loop goes on. A write tool fails the run with TIMEOUT, since its effect may or may not have
+   * happened. Synchronous tools cannot be interrupted.
+   */
+  readonly timeoutMs?: number;
   run(args: A, ctx: ToolContext): MaybePromise<ToolResult>;
 }
 
@@ -83,6 +90,8 @@ export interface AgentConfig {
   readonly reasoning?: ReasoningLevel;
   /** Retries a failed model call. */
   readonly retry?: RetryPolicy;
+  /** Milliseconds each model call may take; a slower call fails with TIMEOUT, which `retry` retries. */
+  readonly timeoutMs?: number;
   /**
    * Decides each call before it runs: run it, refuse it, or pause and ask (`ctx.interrupt`). Called again when
    * the run resumes, so keep it pure. Without it every call runs.
@@ -98,6 +107,9 @@ export const AGENT_DEFAULTS = Object.freeze({ maxRounds: 8, maxCallsPerReply: 32
 const TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 const DENIED = "The user did not allow this call";
 const TOO_MANY = `Too many tool calls in one reply; at most ${AGENT_DEFAULTS.maxCallsPerReply} run`;
+const MAX_TIMEOUT = 2_147_483_647;
+const badTimeout = (ms: unknown): boolean =>
+  ms !== undefined && !(Number.isInteger(ms) && (ms as number) >= 1 && (ms as number) <= MAX_TIMEOUT);
 
 interface JSONSchemaProps {
   readonly jsonSchema?: { readonly input: (options: { readonly target: string }) => Record<string, unknown> };
@@ -170,11 +182,21 @@ export function createAgent(config: AgentConfig): AgentGraph {
     if (t.effect !== undefined && t.effect !== "read" && t.effect !== "write") {
       throw new TypeError(`createAgent: tool "${t.name}" has effect ${String(t.effect)}; use "read" or "write"`);
     }
+    if (badTimeout(t.timeoutMs)) {
+      throw new TypeError(
+        `createAgent: tool "${t.name}" has timeoutMs ${String(t.timeoutMs)}; use an integer from 1 to ${MAX_TIMEOUT}`,
+      );
+    }
     tools.set(t.name, t);
   }
   const maxRounds = config.maxRounds ?? AGENT_DEFAULTS.maxRounds;
   if (!Number.isInteger(maxRounds) || maxRounds < 1)
     throw new TypeError("createAgent: maxRounds must be an integer >= 1");
+  if (badTimeout(config.timeoutMs)) {
+    throw new TypeError(
+      `createAgent: timeoutMs must be an integer from 1 to ${MAX_TIMEOUT}, got ${String(config.timeoutMs)}`,
+    );
+  }
   const specs: ToolSpec[] = [...tools.values()].map((t) => ({
     name: t.name,
     ...(t.description && { description: t.description }),
@@ -220,7 +242,11 @@ export function createAgent(config: AgentConfig): AgentGraph {
       if (s.rounds >= maxRounds) return { ...s, stop: "max_rounds", final: lastAnswer(s.messages) };
       return callModel(s, ctx);
     },
-    { kind: "llm", ...(config.retry && { retry: config.retry }) },
+    {
+      kind: "llm",
+      ...(config.retry && { retry: config.retry }),
+      ...(config.timeoutMs !== undefined && { timeoutMs: config.timeoutMs }),
+    },
   );
 
   /** Runs `pending[0]`. Everything before the tool runs is pure, so re-running the step on resume is safe. */
@@ -261,14 +287,32 @@ export function createAgent(config: AgentConfig): AgentGraph {
             });
             return answered(content, isError);
           };
+          const limit =
+            t.timeoutMs === undefined
+              ? undefined
+              : deadline(
+                  ctx.signal,
+                  t.timeoutMs,
+                  new TaugraphError("TIMEOUT", `Tool "${call.name}" timed out after ${t.timeoutMs}ms`),
+                );
           return settle(
-            () => t.run(result.value, { call, signal: ctx.signal, recovered: ctx.meta.recovered }),
+            () => {
+              const signal = limit?.signal ?? ctx.signal;
+              const value = t.run(result.value, { call, signal, recovered: ctx.meta.recovered });
+              return limit && isThenable(value) ? limit.race(value) : value;
+            },
             (value) => {
+              limit?.dispose();
               const { content, isError } = resultOf(t, value);
               return record(content, isError, false);
             },
             (error) => {
+              limit?.dispose();
               if (ctx.signal.aborted) throw error; // a cancelled run stops; it is not the tool's answer
+              if (limit && error === limit.error) {
+                if (effect === "write") throw error; // the write may or may not have happened: fail, do not guess
+                return record(limit.error.message, true, true);
+              }
               return record(String(error instanceof Error ? `Error: ${error.message}` : error), true, true);
             },
           );

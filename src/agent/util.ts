@@ -33,3 +33,32 @@ export function issuesText(issues: readonly StandardSchemaV1.Issue[]): string {
     })
     .join("; ");
 }
+
+/** A time limit for one call: `signal` aborts with `error` once `ms` pass, and `race` rejects with it. */
+export interface Deadline {
+  readonly signal: AbortSignal;
+  readonly error: Error;
+  race<T>(value: PromiseLike<T>): Promise<T>;
+  /** Clears the timer when the call ends. */
+  dispose(): void;
+}
+
+export function deadline(parent: AbortSignal, ms: number, error: Error): Deadline {
+  const timer = new AbortController();
+  let expire: ((reason: unknown) => void) | undefined;
+  const handle = setTimeout(() => {
+    timer.abort(error);
+    expire?.(error);
+  }, ms);
+  return {
+    signal: AbortSignal.any([parent, timer.signal]),
+    error,
+    race<T>(value: PromiseLike<T>): Promise<T> {
+      return new Promise<T>((resolve, reject) => {
+        expire = reject;
+        Promise.resolve(value).then(resolve, reject); // a late rejection is dropped, never unhandled
+      });
+    },
+    dispose: () => clearTimeout(handle),
+  };
+}
