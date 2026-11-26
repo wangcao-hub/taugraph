@@ -14,6 +14,8 @@ export type TaugraphErrorCode =
   | "MAX_STEPS"
   /** The run's AbortSignal fired. */
   | "ABORTED"
+  /** A node's Promise did not settle within its `timeoutMs`. */
+  | "TIMEOUT"
   /** `runSync` met a Promise. */
   | "ASYNC_IN_SYNC_RUN"
   /** A trace could not be parsed or is not a taugraph trace. */

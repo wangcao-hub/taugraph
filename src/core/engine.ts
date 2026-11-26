@@ -90,6 +90,36 @@ class Wait {
   constructor(readonly ms: number) {}
 }
 
+/** A time limit for one attempt of a node. */
+interface Deadline {
+  /** The attempt's `ctx.signal`: aborts with the run, or with the TIMEOUT error when time is up. */
+  readonly signal: AbortSignal;
+  /** Settles like `promise`, unless time is up first; then it rejects with the TIMEOUT error. */
+  race<T>(promise: PromiseLike<T>): Promise<T>;
+  /** Clears the timer when the attempt ends. */
+  dispose(): void;
+}
+
+function startDeadline(run: AbortSignal, ms: number, error: TaugraphError): Deadline {
+  const timer = new AbortController();
+  let expire: ((reason: unknown) => void) | undefined;
+  const handle = setTimeout(() => {
+    timer.abort(error);
+    expire?.(error);
+  }, ms);
+  return {
+    signal: AbortSignal.any([run, timer.signal]),
+    race<T>(promise: PromiseLike<T>): Promise<T> {
+      return new Promise<T>((resolve, reject) => {
+        expire = reject;
+        // A late result or rejection lands here after the race is settled, so it is dropped, never unhandled.
+        Promise.resolve(promise).then(resolve, reject);
+      });
+    },
+    dispose: () => clearTimeout(handle),
+  };
+}
+
 /** Thrown by `ctx.interrupt` to unwind the node. Detection does not rely on it propagating. */
 class PauseSignal extends Error {
   override readonly name = "TaugraphPause";
@@ -295,16 +325,30 @@ function* runStep<S>(p: StepParams<S>): Effects<StepOutcome<S>> {
     };
     log.append({ type: "enter", nodeId, step, input: state, meta });
     const startedAt = Date.now();
-    const control = createContext({ ...p, attempt, values });
+    const { timeoutMs } = node;
+    const deadline =
+      timeoutMs === undefined
+        ? undefined
+        : startDeadline(
+            p.signal,
+            timeoutMs,
+            new TaugraphError("TIMEOUT", `Node "${nodeId}" (step ${step}) timed out after ${timeoutMs}ms`, {
+              nodeId,
+              step,
+            }),
+          );
+    const control = createContext({ ...p, attempt, values, signal: deadline?.signal ?? p.signal });
     try {
       let output: unknown;
       let failure: { readonly error: unknown } | undefined;
       try {
-        output = yield node(state, control.ctx);
+        const result = node(state, control.ctx);
+        output = yield deadline && isThenable(result) ? deadline.race(result) : result;
       } catch (error) {
         failure = { error };
       } finally {
         control.close();
+        deadline?.dispose();
       }
       // A requested pause wins, even if the node caught the signal or threw something else.
       if (control.pending) {
@@ -336,11 +380,21 @@ function* runStep<S>(p: StepParams<S>): Effects<StepOutcome<S>> {
         policyFailure = { cause }; // retryOn threw: record this attempt as usual, then fail without retrying
       }
       const delayMs = willRetry && node.retry ? retryDelay(node.retry, attempt, thrown) : 0;
+      // A write that timed out or was cut off may have happened anyway.
+      const unknown = node.effect === "write" && (error.code === "TIMEOUT" || error.code === "ABORTED");
       log.append({
         type: "error",
         nodeId,
         step,
-        meta: { attempt, source, code: error.code, message: error.message, willRetry, ...(willRetry && { delayMs }) },
+        meta: {
+          attempt,
+          source,
+          code: error.code,
+          message: error.message,
+          willRetry,
+          ...(willRetry && { delayMs }),
+          ...(unknown && { outcome: "unknown" }),
+        },
       });
       if (policyFailure) {
         const { cause } = policyFailure;

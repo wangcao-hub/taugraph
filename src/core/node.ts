@@ -1,14 +1,18 @@
-import { freezeRetry } from "./retry.js";
+import { freezeRetry, MAX_DELAY_MS } from "./retry.js";
 import type { Node, NodeFn, NodeMeta } from "./types.js";
 
 const atLeast = (value: unknown, min: number): boolean =>
   typeof value === "number" && Number.isFinite(value) && value >= min;
 
 /**
- * What is wrong with a node's retry policy, or undefined. `defineNode` and `createGraph` both check it, so a node
- * built without `defineNode` cannot slip past.
+ * What is wrong with a node's retry policy or timeout, or undefined. `defineNode` and `createGraph` both check it, so
+ * a node built without `defineNode` cannot slip past.
  */
 export function nodeMetaProblem(meta: NodeMeta): string | undefined {
+  const { timeoutMs } = meta;
+  if (timeoutMs !== undefined && !(Number.isInteger(timeoutMs) && timeoutMs >= 1 && timeoutMs <= MAX_DELAY_MS)) {
+    return `timeoutMs must be an integer from 1 to ${MAX_DELAY_MS}, got ${String(timeoutMs)}`;
+  }
   const retry: unknown = meta.retry;
   if (retry === undefined) return undefined;
   if (typeof retry !== "object" || retry === null) return `retry must be an object, got ${String(retry)}`;
@@ -63,6 +67,7 @@ export function defineNode<S>(fn: NodeFn<S>, meta: NodeMeta = {}): Node<S> {
       ...(meta.kind !== undefined && { kind: meta.kind }),
       ...(meta.effect !== undefined && { effect: meta.effect }),
       ...(meta.retry !== undefined && { retry: freezeRetry(meta.retry) }),
+      ...(meta.timeoutMs !== undefined && { timeoutMs: meta.timeoutMs }),
     }),
   );
 }

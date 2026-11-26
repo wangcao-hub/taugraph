@@ -119,6 +119,11 @@ export interface NodeMeta {
   readonly kind?: string;
   readonly retry?: RetryPolicy;
   readonly effect?: Effect;
+  /**
+   * Fails the attempt with TIMEOUT when the node's Promise has not settled after this many milliseconds, and aborts
+   * `ctx.signal`. An integer from 1 to 2147483647. Synchronous code cannot be interrupted.
+   */
+  readonly timeoutMs?: number;
 }
 
 /** Any function with the `NodeFn` signature is a node. Plugins attach metadata with `defineNode`. */

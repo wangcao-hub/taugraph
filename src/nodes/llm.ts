@@ -140,6 +140,8 @@ interface LLMNodeBase<S> {
   readonly prompt: (state: S) => LLMRequest | string;
   /** Retries the whole call, including output parsing. */
   readonly retry?: RetryPolicy;
+  /** Milliseconds each attempt may take; then the request's signal aborts and the attempt fails with TIMEOUT. */
+  readonly timeoutMs?: number;
 }
 
 export interface LLMTextNodeConfig<S> extends LLMNodeBase<S> {
@@ -196,7 +198,11 @@ export function LLMNode<S, T>(config: LLMTextNodeConfig<S> | LLMStructuredNodeCo
         );
       });
     },
-    { kind: "llm", ...(config.retry && { retry: config.retry }) },
+    {
+      kind: "llm",
+      ...(config.retry && { retry: config.retry }),
+      ...(config.timeoutMs !== undefined && { timeoutMs: config.timeoutMs }),
+    },
   );
 }
 

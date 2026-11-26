@@ -4,6 +4,11 @@ export interface CodeNodeOptions {
   readonly retry?: RetryPolicy;
   /** Declare `"write"` for code that changes the outside world, so replay will not repeat it. */
   readonly effect?: Effect;
+  /**
+   * Milliseconds an async node may take; then it fails with TIMEOUT and `ctx.signal` aborts. Synchronous code cannot
+   * be interrupted.
+   */
+  readonly timeoutMs?: number;
 }
 
 /**
