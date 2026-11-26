@@ -128,7 +128,8 @@ describe("isRetryable", () => {
 
   it("refuses 4xx except 408, 409, 425 and 429, on the error or its cause chain", () => {
     for (const status of [400, 401, 403, 404, 422]) expect(isRetryable(withStatus(status)), String(status)).toBe(false);
-    for (const status of [408, 409, 425, 429, 500, 502, 503]) expect(isRetryable(withStatus(status)), String(status)).toBe(true);
+    for (const status of [408, 409, 425, 429, 500, 502, 503])
+      expect(isRetryable(withStatus(status)), String(status)).toBe(true);
     expect(isRetryable(nested(1, withStatus(404)))).toBe(false);
     expect(isRetryable(nested(5, { status: 400 }))).toBe(false);
     expect(isRetryable(nested(6, { status: 400 }))).toBe(true); // deeper than 5 levels of cause
@@ -347,7 +348,9 @@ describe("write nodes and retries", () => {
       "defineNode: a write node with retry must set retry.idempotent: true (use ctx.meta.idempotencyKey to make repeats safe)",
     );
     const raw = Object.assign((s: State) => s, { effect: "write" as const, retry: { maxAttempts: 2 } });
-    const error = syncFailure(() => createGraph(schema, { start: "place", nodes: { place: raw }, endNodes: ["place"] }));
+    const error = syncFailure(() =>
+      createGraph(schema, { start: "place", nodes: { place: raw }, endNodes: ["place"] }),
+    );
     expect(error.code).toBe("INVALID_GRAPH");
     expect(error.message).toBe(
       'createGraph: node "place": a write node with retry must set retry.idempotent: true (use ctx.meta.idempotencyKey to make repeats safe)',
@@ -660,20 +663,20 @@ export function defineNode<S>(fn: NodeFn<S>, meta: NodeMeta = {}): Node<S> {
 In `src/core/graph.ts`, add `import { nodeMetaProblem } from "./node.js";` and, in `compile`, replace
 
 ```ts
-  for (const id of ids) {
-    if (typeof nodes[id] !== "function") fail(`Node "${id}" is not a function`);
-  }
+for (const id of ids) {
+  if (typeof nodes[id] !== "function") fail(`Node "${id}" is not a function`);
+}
 ```
 
 with
 
 ```ts
-  for (const id of ids) {
-    const node = nodes[id];
-    if (typeof node !== "function") fail(`Node "${id}" is not a function`);
-    const problem = nodeMetaProblem(node as Node<S>);
-    if (problem !== undefined) fail(`createGraph: node "${id}": ${problem}`);
-  }
+for (const id of ids) {
+  const node = nodes[id];
+  if (typeof node !== "function") fail(`Node "${id}" is not a function`);
+  const problem = nodeMetaProblem(node as Node<S>);
+  if (problem !== undefined) fail(`createGraph: node "${id}": ${problem}`);
+}
 ```
 
 - [ ] **Step 6: Retry decisions and waits in the engine.** In `src/core/engine.ts`:
@@ -827,7 +830,7 @@ function abortable<T>(promise: PromiseLike<T>, signal: AbortSignal | undefined):
 - [ ] **Step 8: Keep existing retry tests fast.** In `test/runtime.test.ts`, in "retries a node up to retry.maxAttempts", change `{ retry: { maxAttempts: 3 } }` to `{ retry: { maxAttempts: 3, backoff: false } }` and add after the `willRetry` assertion:
 
 ```ts
-    expect(errors.map((e) => e.meta?.delayMs)).toEqual([0, 0]);
+expect(errors.map((e) => e.meta?.delayMs)).toEqual([0, 0]);
 ```
 
 In "gives up after the last attempt", change `{ retry: { maxAttempts: 2 } }` to `{ retry: { maxAttempts: 2, backoff: false } }`. In `test/nodes.test.ts`, in "retries when structured output is invalid", change `retry: { maxAttempts: 3 },` to `retry: { maxAttempts: 3, backoff: false },`.
@@ -848,6 +851,7 @@ git commit -m "feat(core): retry backoff, isRetryable, idempotent writes"
 ```
 
 ---
+
 ### Task 2: Node timeouts in the kernel, `CodeNode` and `LLMNode`
 
 **Files:**
@@ -1171,22 +1175,22 @@ with
 In the attempt loop's `catch (thrown)` block, replace the `log.append({ type: "error", ... })` call with:
 
 ```ts
-      // A write that timed out or was cut off may have happened anyway.
-      const unknown = node.effect === "write" && (error.code === "TIMEOUT" || error.code === "ABORTED");
-      log.append({
-        type: "error",
-        nodeId,
-        step,
-        meta: {
-          attempt,
-          source,
-          code: error.code,
-          message: error.message,
-          willRetry,
-          ...(willRetry && { delayMs }),
-          ...(unknown && { outcome: "unknown" }),
-        },
-      });
+// A write that timed out or was cut off may have happened anyway.
+const unknown = node.effect === "write" && (error.code === "TIMEOUT" || error.code === "ABORTED");
+log.append({
+  type: "error",
+  nodeId,
+  step,
+  meta: {
+    attempt,
+    source,
+    code: error.code,
+    message: error.message,
+    willRetry,
+    ...(willRetry && { delayMs }),
+    ...(unknown && { outcome: "unknown" }),
+  },
+});
 ```
 
 If `tsc -p tsconfig.core.json` reports that `AbortSignal.any` does not exist, the DOM lib is older than expected: stop and report it instead of writing a replacement.
@@ -1417,21 +1421,21 @@ const badTimeout = (ms: unknown): boolean =>
 In `createAgent`, inside the `for (const t of config.tools ?? [])` loop, after the `effect` check, add:
 
 ```ts
-    if (badTimeout(t.timeoutMs)) {
-      throw new TypeError(
-        `createAgent: tool "${t.name}" has timeoutMs ${String(t.timeoutMs)}; use an integer from 1 to ${MAX_TIMEOUT}`,
-      );
-    }
+if (badTimeout(t.timeoutMs)) {
+  throw new TypeError(
+    `createAgent: tool "${t.name}" has timeoutMs ${String(t.timeoutMs)}; use an integer from 1 to ${MAX_TIMEOUT}`,
+  );
+}
 ```
 
 After the `maxRounds` check, add:
 
 ```ts
-  if (badTimeout(config.timeoutMs)) {
-    throw new TypeError(
-      `createAgent: timeoutMs must be an integer from 1 to ${MAX_TIMEOUT}, got ${String(config.timeoutMs)}`,
-    );
-  }
+if (badTimeout(config.timeoutMs)) {
+  throw new TypeError(
+    `createAgent: timeoutMs must be an integer from 1 to ${MAX_TIMEOUT}, got ${String(config.timeoutMs)}`,
+  );
+}
 ```
 
 Change the metadata of the `think` node from `{ kind: "llm", ...(config.retry && { retry: config.retry }) }` to:
@@ -1494,6 +1498,7 @@ git commit -m "feat(agent): timeoutMs for model calls and tools"
 ```
 
 ---
+
 ### Task 4: Async sinks
 
 **Files:**
@@ -1902,9 +1907,9 @@ In `driveSync`, add a branch after the `Wait` branch:
 In `driveAsync`, change the effect dispatch to:
 
 ```ts
-      if (effect instanceof Wait) value = await sleep(effect.ms, signal);
-      else if (effect instanceof SinkWait) value = await abortable(effect.done, signal);
-      else value = isThenable(effect) ? await abortable(effect, signal) : effect;
+if (effect instanceof Wait) value = await sleep(effect.ms, signal);
+else if (effect instanceof SinkWait) value = await abortable(effect.done, signal);
+else value = isThenable(effect) ? await abortable(effect, signal) : effect;
 ```
 
 - [ ] **Step 6: Run the tests.**
@@ -2130,12 +2135,12 @@ function retryAfter(header: string | null): number | undefined {
 In `openAICompatible`, after `const id = ...;`, add:
 
 ```ts
-  const tokenLimit = options.tokenLimit ?? "max_tokens";
-  if (tokenLimit !== "max_tokens" && tokenLimit !== "max_completion_tokens") {
-    throw new TypeError(
-      `openAICompatible: tokenLimit must be "max_tokens" or "max_completion_tokens", got ${String(options.tokenLimit)}`,
-    );
-  }
+const tokenLimit = options.tokenLimit ?? "max_tokens";
+if (tokenLimit !== "max_tokens" && tokenLimit !== "max_completion_tokens") {
+  throw new TypeError(
+    `openAICompatible: tokenLimit must be "max_tokens" or "max_completion_tokens", got ${String(options.tokenLimit)}`,
+  );
+}
 ```
 
 In the request body, replace `max_tokens: request.maxTokens,` with `[tokenLimit]: request.maxTokens,`.
@@ -2143,23 +2148,23 @@ In the request body, replace `max_tokens: request.maxTokens,` with `[tokenLimit]
 Replace
 
 ```ts
-      if (!response.ok) {
-        throw new Error(`${url} responded ${response.status}: ${(await response.text()).slice(0, 500)}`);
-      }
+if (!response.ok) {
+  throw new Error(`${url} responded ${response.status}: ${(await response.text()).slice(0, 500)}`);
+}
 ```
 
 with
 
 ```ts
-      if (!response.ok) {
-        const text = await response.text().catch(() => "");
-        throw new HTTPError(
-          `${url} responded ${response.status}: ${text.slice(0, 500)}`,
-          response.status,
-          url,
-          retryAfter(response.headers.get("retry-after")),
-        );
-      }
+if (!response.ok) {
+  const text = await response.text().catch(() => "");
+  throw new HTTPError(
+    `${url} responded ${response.status}: ${text.slice(0, 500)}`,
+    response.status,
+    url,
+    retryAfter(response.headers.get("retry-after")),
+  );
+}
 ```
 
 Also change the `fetch` option's doc comment to "Used instead of the global `fetch`, e.g. for a proxy or tests." (retries now belong to the node's `retry`).
@@ -2180,6 +2185,7 @@ git commit -m "feat(openai): HTTPError with status and Retry-After, tokenLimit o
 ```
 
 ---
+
 ### Task 6: Documentation and CHANGELOG
 
 **Files:**
