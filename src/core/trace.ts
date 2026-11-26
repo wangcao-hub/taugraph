@@ -1,7 +1,7 @@
 import { TaugraphError } from "./errors.js";
 import { applyPatch, diffJson, jsonLengthAtMost, type PatchOp } from "./patch.js";
-import type { KernelEventType, Trace, TraceEvent, TraceEventType } from "./types.js";
-import { freezeJson, jsonEqual } from "./util.js";
+import type { KernelEventType, MaybePromise, Trace, TraceEvent, TraceEventType } from "./types.js";
+import { freezeJson, isThenable, jsonEqual } from "./util.js";
 
 export const TRACE_FORMAT = "taugraph.trace";
 export const TRACE_VERSION = 2;
@@ -26,21 +26,26 @@ export interface EventDraft {
   readonly meta?: Readonly<Record<string, unknown>> | undefined;
 }
 
+type Sink = (event: TraceEvent) => MaybePromise<void>;
+
 /**
  * Append-only event log for one run. Payloads must already be frozen JSON
  * (see `freezeJson`); the log only assigns seq / runId / timestamp and freezes the envelope.
  *
- * Every event is handed to `onEvent` before `append` returns. If the sink throws, `append`
- * throws SINK_FAILED and keeps throwing, so the run cannot take another step unlogged.
+ * Every event goes to `onEvent` in order, one call at a time: while an async call is unfinished, later events wait in
+ * a chain, and `pending()` gives the engine that chain to wait on. If the sink throws or rejects, `append` throws
+ * SINK_FAILED and keeps throwing, so the run cannot take another step unlogged.
  */
 export class TraceLog {
   readonly #events: TraceEvent[];
   readonly #runId: string;
-  readonly #onEvent: ((event: TraceEvent) => void) | undefined;
+  #onEvent: Sink | undefined;
   #sinkError: { readonly cause: unknown } | undefined;
+  /** Unfinished calls of an async sink, chained in event order. */
+  #tail: Promise<void> | undefined;
 
   /** `prefix` continues an existing trace (resume); it is not sent to `onEvent` again. */
-  constructor(runId: string, onEvent?: (event: TraceEvent) => void, prefix: Trace = []) {
+  constructor(runId: string, onEvent?: Sink, prefix: Trace = []) {
     this.#runId = runId;
     this.#onEvent = onEvent;
     this.#events = prefix.map((event) => freezeJson(event));
@@ -66,6 +71,23 @@ export class TraceLog {
     return event;
   }
 
+  /**
+   * Resolves once an async sink has stored every event so far, or rejects with SINK_FAILED. Undefined when no call
+   * is unfinished, which is always the case with a synchronous sink.
+   */
+  pending(): Promise<void> | undefined {
+    const tail = this.#tail;
+    if (!tail) return undefined;
+    return tail.then(() => {
+      if (this.#tail === tail) this.#tail = undefined;
+    });
+  }
+
+  /** Stops calling the sink: `runSync` does this once the sink returned a Promise it cannot wait for. */
+  detach(): void {
+    this.#onEvent = undefined;
+  }
+
   snapshot(): Trace {
     return Object.freeze(this.#events.slice());
   }
@@ -88,13 +110,36 @@ export class TraceLog {
   }
 
   #emit(event: TraceEvent): void {
-    if (!this.#onEvent) return;
-    try {
-      this.#onEvent(event);
-    } catch (cause) {
-      this.#sinkError = { cause };
-      throw sinkFailed(cause);
+    const sink = this.#onEvent;
+    if (!sink) return;
+    if (this.#tail) {
+      this.#chain(this.#tail.then(() => this.#call(sink, event)));
+      return;
     }
+    const result = this.#call(sink, event);
+    if (isThenable(result)) this.#chain(Promise.resolve(result));
+  }
+
+  /** Calls the sink. A synchronous throw marks the log as failed and becomes SINK_FAILED. */
+  #call(sink: Sink, event: TraceEvent): unknown {
+    try {
+      return sink(event);
+    } catch (cause) {
+      if (!this.#sinkError) this.#sinkError = { cause };
+      throw sinkFailed(this.#sinkError.cause);
+    }
+  }
+
+  #chain(work: Promise<unknown>): void {
+    const tail = work.then(
+      () => undefined,
+      (reason: unknown) => {
+        if (!this.#sinkError) this.#sinkError = { cause: reason };
+        throw sinkFailed(this.#sinkError.cause);
+      },
+    );
+    tail.catch(() => {}); // the engine sees the failure through pending(); never an unhandled rejection
+    this.#tail = tail;
   }
 }
 

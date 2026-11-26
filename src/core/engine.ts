@@ -3,14 +3,18 @@
  *
  * Every operation that might be asynchronous (a node call, a schema validation) is
  * `yield`ed. `driveSync` feeds results straight back and rejects Promises;
- * `driveAsync` awaits them. This keeps the kernel sync-first without tying it to
- * any async runtime, and both drivers share exactly the same semantics.
+ * `driveAsync` awaits them. The engine also yields two internal effects: `Wait`,
+ * to sleep before a retry (`run` sleeps, `runSync` blocks with `Atomics.wait`),
+ * and `SinkWait`, for an unfinished async `onEvent` (`run` awaits it, `runSync`
+ * refuses it). This keeps the kernel sync-first without tying it to any async
+ * runtime, and both drivers share exactly the same semantics.
  */
 import { formatIssues, TaugraphError } from "./errors.js";
 import { FATAL, isRetryable, retryDelay } from "./retry.js";
 import type { StandardSchemaV1 } from "./standard-schema.js";
 import {
   deliveredValues,
+  type EventDraft,
   KERNEL_EVENT_TYPES,
   type RecordedAnswers,
   type RecordedStep,
@@ -90,6 +94,26 @@ class Wait {
   constructor(readonly ms: number) {}
 }
 
+/** Yielded to wait for an async `onEvent`: `run` awaits it, `runSync` refuses it and stops calling the sink. */
+class SinkWait {
+  constructor(
+    readonly done: Promise<void>,
+    readonly detach: () => void,
+  ) {}
+}
+
+/** Appends a kernel event and, with an async sink, waits until the sink has stored it. */
+function* record(log: TraceLog, draft: EventDraft): Effects<void> {
+  log.append(draft);
+  yield* drain(log);
+}
+
+/** Waits until an async sink has stored every event so far. Nothing to wait for with a synchronous sink. */
+function* drain(log: TraceLog): Effects<void> {
+  const done = log.pending();
+  if (done) yield new SinkWait(done, () => log.detach());
+}
+
 /** A time limit for one attempt of a node. */
 interface Deadline {
   /** The attempt's `ctx.signal`: aborts with the run, or with the TIMEOUT error when time is up. */
@@ -157,7 +181,7 @@ export function* execute<S>(params: ExecuteParams<S>): Effects<RunResult<S>> {
         const outcome = yield* runStep(params);
         carry = { values: undefined, recovered: false };
         if (outcome.kind === "pause") {
-          log.append({
+          yield* record(log, {
             type: "run_end",
             meta: { status: "paused", steps: tracePath(log.snapshot()).length, pending: { nodeId: current, step } },
           });
@@ -171,7 +195,7 @@ export function* execute<S>(params: ExecuteParams<S>): Effects<RunResult<S>> {
       }
     }
 
-    log.append({
+    yield* record(log, {
       type: "run_end",
       output: state,
       meta: { status: "completed", steps: tracePath(log.snapshot()).length },
@@ -195,6 +219,13 @@ export function* execute<S>(params: ExecuteParams<S>): Effects<RunResult<S>> {
         },
       },
     });
+    if (error.code !== "ABORTED") {
+      try {
+        yield* drain(log); // the sink still gets run_end, but a failure now would hide the first one
+      } catch {
+        // Already failing; the original error is the one to report.
+      }
+    }
     error.trace = log.snapshot();
     throw error;
   }
@@ -207,7 +238,7 @@ function* beginRun<S>(
   replay: ReplayPlan<S> | undefined,
 ): Effects<Start<S>> {
   const input = toJson(rawInput, "Run input is not plain JSON");
-  log.append({
+  yield* record(log, {
     type: "run_start",
     input,
     meta: {
@@ -224,7 +255,7 @@ function* beginRun<S>(
 function* beginResume<S>(graph: CompiledGraph<S>, log: TraceLog, plan: ResumePlan): Effects<Start<S>> {
   const { point } = plan;
   if (point.kind === "start" || point.kind === "after") {
-    log.append({ type: "resume", meta: { reason: "recovered" } });
+    yield* record(log, { type: "resume", meta: { reason: "recovered" } });
     if (point.kind === "start") {
       const input = (plan.trace[0] as Trace[number]).input;
       const state = yield* validate(graph.schema, input, "Run input failed schema validation");
@@ -244,7 +275,7 @@ function* beginResume<S>(graph: CompiledGraph<S>, log: TraceLog, plan: ResumePla
   }
 
   const delivered = point.kind === "paused";
-  log.append({
+  yield* record(log, {
     type: "resume",
     nodeId: point.nodeId,
     step: point.step,
@@ -285,11 +316,11 @@ function* runStep<S>(p: StepParams<S>): Effects<StepOutcome<S>> {
 
   if (recorded && recorded.nodeId === nodeId && jsonEqual(recorded.input, state)) {
     const meta = { attempt: 1, source: "recorded", recordedFrom: { runId: replay?.sourceRunId, seq: recorded.seq } };
-    log.append({ type: "enter", nodeId, step, input: state, meta });
+    yield* record(log, { type: "enter", nodeId, step, input: state, meta });
     const output = toJson(recorded.output, `Recorded output of node "${nodeId}" is not plain JSON`, nodeId, step);
     const message = `Recorded output of node "${nodeId}" (step ${step}) no longer matches the schema`;
     const next = yield* validate(graph.schema, output, message, nodeId, step, state);
-    log.append({ type: "exit", nodeId, step, output: next, meta: { ...meta, durationMs: 0 } });
+    yield* record(log, { type: "exit", nodeId, step, output: next, meta: { ...meta, durationMs: 0 } });
     return { kind: "exit", state: next };
   }
 
@@ -309,7 +340,13 @@ function* runStep<S>(p: StepParams<S>): Effects<StepOutcome<S>> {
     values = answers && answers.nodeId === nodeId && jsonEqual(answers.input, state) ? answers.values : [];
     for (const value of values) {
       const from = { runId: replay?.sourceRunId };
-      log.append({ type: "resume", nodeId, step, input: value, meta: { reason: "replayed", recordedFrom: from } });
+      yield* record(log, {
+        type: "resume",
+        nodeId,
+        step,
+        input: value,
+        meta: { reason: "replayed", recordedFrom: from },
+      });
     }
   }
 
@@ -323,7 +360,7 @@ function* runStep<S>(p: StepParams<S>): Effects<StepOutcome<S>> {
       ...(node.effect !== undefined && { effect: node.effect }),
       ...(p.recovered && { recovered: true }),
     };
-    log.append({ type: "enter", nodeId, step, input: state, meta });
+    yield* record(log, { type: "enter", nodeId, step, input: state, meta });
     const startedAt = Date.now();
     const { timeoutMs } = node;
     const deadline =
@@ -350,11 +387,12 @@ function* runStep<S>(p: StepParams<S>): Effects<StepOutcome<S>> {
         control.close();
         deadline?.dispose();
       }
+      yield* drain(log); // events the node appended are stored before its step ends
       // A requested pause wins, even if the node caught the signal or threw something else.
       if (control.pending) {
         const { request } = control.pending;
         const durationMs = Date.now() - startedAt;
-        log.append({ type: "pause", nodeId, step, output: request, meta: { ...meta, durationMs } });
+        yield* record(log, { type: "pause", nodeId, step, output: request, meta: { ...meta, durationMs } });
         return { kind: "pause", request };
       }
       if (failure) throw failure.error;
@@ -368,7 +406,13 @@ function* runStep<S>(p: StepParams<S>): Effects<StepOutcome<S>> {
         step,
         state,
       );
-      log.append({ type: "exit", nodeId, step, output: next, meta: { ...meta, durationMs: Date.now() - startedAt } });
+      yield* record(log, {
+        type: "exit",
+        nodeId,
+        step,
+        output: next,
+        meta: { ...meta, durationMs: Date.now() - startedAt },
+      });
       return { kind: "exit", state: next };
     } catch (thrown) {
       const error = asNodeError(thrown, nodeId, step);
@@ -382,7 +426,7 @@ function* runStep<S>(p: StepParams<S>): Effects<StepOutcome<S>> {
       const delayMs = willRetry && node.retry ? retryDelay(node.retry, attempt, thrown) : 0;
       // A write that timed out or was cut off may have happened anyway.
       const unknown = node.effect === "write" && (error.code === "TIMEOUT" || error.code === "ABORTED");
-      log.append({
+      yield* record(log, {
         type: "error",
         nodeId,
         step,
@@ -602,6 +646,12 @@ export function driveSync<T>(effects: Effects<T>): T {
         failure = error as TaugraphError;
       }
       next = failure ? effects.throw(failure) : effects.next(undefined);
+    } else if (effect instanceof SinkWait) {
+      effect.done.catch(() => {}); // the sink finishes on its own; avoid an unhandled rejection
+      effect.detach();
+      next = effects.throw(
+        new TaugraphError("ASYNC_IN_SYNC_RUN", "onEvent returned a Promise; use run() for an async sink"),
+      );
     } else if (isThenable(effect)) {
       Promise.resolve(effect).catch(() => {}); // the result is discarded; avoid an unhandled rejection
       next = effects.throw(
@@ -632,6 +682,7 @@ export async function driveAsync<T>(effects: Effects<T>, signal?: AbortSignal): 
     let value: unknown;
     try {
       if (effect instanceof Wait) value = await sleep(effect.ms, signal);
+      else if (effect instanceof SinkWait) value = await abortable(effect.done, signal);
       else value = isThenable(effect) ? await abortable(effect, signal) : effect;
     } catch (error) {
       next = effects.throw(error);

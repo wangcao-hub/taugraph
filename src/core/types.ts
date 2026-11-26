@@ -162,10 +162,13 @@ export interface RunOptions {
   /** Upper bound on node executions, guards against unbounded loops. Defaults to 100. */
   readonly maxSteps?: number;
   /**
-   * Called synchronously for every appended event, before the run continues. Use it to write
-   * the trace to durable storage. If it throws, the run stops with SINK_FAILED.
+   * Called for every appended event, in order, before the run continues: use it to write the trace to durable
+   * storage. It may return a Promise. `run` then waits for it after each kernel event, so a `write` step's `enter` is
+   * stored before the node runs, and waits for the events a node appended before that step's `exit`. Calls never
+   * overlap. If it throws or rejects, the run stops with SINK_FAILED. `runSync` takes synchronous sinks only.
    */
-  readonly onEvent?: (event: TraceEvent) => void;
+  // Two signatures, not `=> MaybePromise<void>`: only a plain `void` return accepts sinks like `(e) => events.push(e)`.
+  readonly onEvent?: ((event: TraceEvent) => void) | ((event: TraceEvent) => PromiseLike<void>);
 }
 
 export type ReplayMode = "recorded" | "live";
