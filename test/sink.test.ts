@@ -229,6 +229,22 @@ describe("async onEvent", () => {
     expect(types).toEqual(["run_start", "enter", "tool_call"]);
   });
 
+  it("reports ABORTED when the run is aborted while the error event is being stored", async () => {
+    const node = CodeNode<State>(async () => {
+      await sleep(5);
+      throw new Error("x");
+    });
+    const onEvent = (e: TraceEvent) => (e.type === "error" ? new Promise<void>(() => {}) : Promise.resolve());
+    const controller = new AbortController();
+    const started = Date.now();
+    const pending = single(node).run({ n: 0 }, { onEvent, signal: controller.signal });
+    setTimeout(() => controller.abort(), 20);
+    const error = await failure(pending);
+    expect(error.code).toBe("ABORTED");
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(error.trace?.find((e) => e.type === "error")?.meta).toMatchObject({ code: "NODE_FAILED" });
+  });
+
   it("stores events in order when a node is retried", async () => {
     let attempts = 0;
     const node = CodeNode<State>(

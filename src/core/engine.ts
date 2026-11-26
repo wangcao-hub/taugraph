@@ -442,8 +442,10 @@ function* runStep<S>(p: StepParams<S>): Effects<StepOutcome<S>> {
           },
         });
       } catch (failure) {
-        // An aborted run reports ABORTED, even if a sink listening to the same signal failed meanwhile.
+        // An aborted run reports ABORTED, even if a sink listening to the same signal failed
+        // meanwhile or the wait for the sink was cut short.
         if (!p.signal.aborted) throw failure;
+        throw error.code === "ABORTED" ? error : asNodeError(abortError(p.signal), nodeId, step);
       }
       if (policyFailure) {
         const { cause } = policyFailure;
