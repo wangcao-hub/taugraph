@@ -4,7 +4,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
-## [0.4.0] - 2026-11-25
+## [0.4.0] - 2026-11-26
 
 Traces grow linearly instead of with the square of the run, in memory and in JSONL (format version 2), and `taugraph/file` stores them as crash-safe files that a restarted process can continue. Retries now wait and skip errors that cannot heal, nodes and tools can time out, and `onEvent` can be async.
 
