@@ -30,7 +30,12 @@ export interface OpenAICompatibleOptions {
    * without it. Set false for endpoints that refuse the field in input messages, such as Groq and Cerebras.
    */
   readonly sendReasoning?: boolean | undefined;
-  /** Used instead of the global `fetch`, e.g. for a proxy, retries or tests. */
+  /**
+   * The request field that carries `maxTokens`. Default `"max_tokens"`; OpenAI's reasoning models (o-series, GPT-5)
+   * want `"max_completion_tokens"`.
+   */
+  readonly tokenLimit?: "max_tokens" | "max_completion_tokens" | undefined;
+  /** Used instead of the global `fetch`, e.g. for a proxy or tests. */
   readonly fetch?: typeof fetch | undefined;
 }
 
@@ -39,6 +44,29 @@ export interface OpenAIToolCall {
   readonly id?: string;
   readonly type?: string;
   readonly function?: { readonly name?: string; readonly arguments?: string };
+}
+
+/** A response outside 200-299. `status` and `retryAfterMs` let `isRetryable` and the retry wait act on it. */
+export class HTTPError extends Error {
+  override readonly name = "HTTPError";
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly url: string,
+    /** From `Retry-After`, given in seconds or as an HTTP date; undefined when missing or unreadable. */
+    readonly retryAfterMs: number | undefined,
+  ) {
+    super(message);
+  }
+}
+
+/** `Retry-After` in milliseconds: a number of seconds, or an HTTP date (0 once it has passed). */
+function retryAfter(header: string | null): number | undefined {
+  if (header === null) return undefined;
+  const text = header.trim();
+  if (/^\d+(\.\d+)?$/.test(text)) return Math.round(Number(text) * 1000);
+  const date = Date.parse(text);
+  return Number.isNaN(date) ? undefined : Math.max(0, date - Date.now());
 }
 
 interface ChatCompletion {
@@ -191,6 +219,12 @@ export function fromOpenAIToolCalls(calls: readonly OpenAIToolCall[], round = 1)
 export function openAICompatible(options: OpenAICompatibleOptions): LLMModel {
   const url = `${options.baseURL.replace(/\/+$/, "")}/chat/completions`;
   const id = `openai-compatible:${options.model}`;
+  const tokenLimit = options.tokenLimit ?? "max_tokens";
+  if (tokenLimit !== "max_tokens" && tokenLimit !== "max_completion_tokens") {
+    throw new TypeError(
+      `openAICompatible: tokenLimit must be "max_tokens" or "max_completion_tokens", got ${String(options.tokenLimit)}`,
+    );
+  }
   const readImage = (image: string): MaybePromise<ImagePart> => {
     if (/^https?:/i.test(image)) return { type: "image", url: image };
     if (!options.resolveImage) throw new TypeError(`Image "${shown(image)}" needs resolveImage to be read`);
@@ -211,7 +245,7 @@ export function openAICompatible(options: OpenAICompatibleOptions): LLMModel {
           model: options.model,
           messages: toOpenAIMessages(messages, options.sendReasoning === false ? undefined : id),
           temperature: request.temperature,
-          max_tokens: request.maxTokens,
+          [tokenLimit]: request.maxTokens,
           ...(request.responseFormat === "json" && { response_format: { type: "json_object" } }),
           ...(request.tools?.length && { tools: toOpenAITools(request.tools) }),
           ...(request.toolChoice && { tool_choice: toOpenAIToolChoice(request.toolChoice) }),
@@ -220,7 +254,13 @@ export function openAICompatible(options: OpenAICompatibleOptions): LLMModel {
         }),
       });
       if (!response.ok) {
-        throw new Error(`${url} responded ${response.status}: ${(await response.text()).slice(0, 500)}`);
+        const text = await response.text().catch(() => "");
+        throw new HTTPError(
+          `${url} responded ${response.status}: ${text.slice(0, 500)}`,
+          response.status,
+          url,
+          retryAfter(response.headers.get("retry-after")),
+        );
       }
       const body = (await response.json()) as ChatCompletion;
       const choice = body.choices?.[0];

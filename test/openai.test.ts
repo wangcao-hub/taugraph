@@ -1,7 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fromOpenAIToolCalls, openAICompatible, toOpenAIMessages } from "../src/openai/index.js";
+import { z } from "zod";
+import { createGraph, isRetryable } from "../src/index.js";
+import { LLMNode } from "../src/nodes/index.js";
+import { fromOpenAIToolCalls, HTTPError, openAICompatible, toOpenAIMessages } from "../src/openai/index.js";
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.useRealTimers();
+});
 
 describe("OpenAI-compatible adapter", () => {
   const png = { type: "image" as const, data: "iVBORw0KGgo=", mimeType: "image/png" };
@@ -319,5 +325,132 @@ describe("OpenAI-compatible adapter", () => {
     );
     expect(response.content).toBe("ok");
     expect(urls).toEqual(["http://x/v1/chat/completions"]);
+  });
+});
+
+/** A response without streams, so it settles in microtasks (fake timers do not have to wait for I/O). */
+const reply = (status: number, body: string, headers: Record<string, string> = {}): Response =>
+  ({
+    ok: status >= 200 && status < 300,
+    status,
+    headers: new Headers(headers),
+    text: async () => body,
+    json: async () => JSON.parse(body),
+  }) as unknown as Response;
+const okBody = JSON.stringify({ choices: [{ message: { content: "hi" } }] });
+
+describe("HTTP errors", () => {
+  const signal = new AbortController().signal;
+  const failing = (response: Response) =>
+    Promise.resolve(
+      openAICompatible({ baseURL: "http://x/v1", model: "m", fetch: async () => response }).complete(
+        { messages: [] },
+        { signal },
+      ),
+    ).then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+
+  it("throws HTTPError with the status, the URL, Retry-After and the start of the body", async () => {
+    const error = await failing(reply(429, "x".repeat(600), { "retry-after": "3" }));
+    expect(error).toBeInstanceOf(HTTPError);
+    expect(error).toMatchObject({
+      name: "HTTPError",
+      status: 429,
+      url: "http://x/v1/chat/completions",
+      retryAfterMs: 3000,
+      message: `http://x/v1/chat/completions responded 429: ${"x".repeat(500)}`,
+    });
+    expect(isRetryable(error)).toBe(true);
+  });
+
+  it("reads Retry-After as an HTTP date, and leaves it out when missing or unreadable", async () => {
+    const date = new Date(Date.now() + 10_000).toUTCString();
+    const dated = (await failing(reply(503, "busy", { "retry-after": date }))) as HTTPError;
+    expect(dated.retryAfterMs).toBeGreaterThan(8000);
+    expect(dated.retryAfterMs).toBeLessThanOrEqual(10_000);
+    const missing = (await failing(reply(400, "bad"))) as HTTPError;
+    expect(missing.retryAfterMs).toBeUndefined();
+    expect(isRetryable(missing)).toBe(false);
+    const unreadable = (await failing(reply(503, "busy", { "retry-after": "soon" }))) as HTTPError;
+    expect(unreadable.retryAfterMs).toBeUndefined();
+  });
+
+  it("lets LLMNode give up on a 400 at once and retry a 429 after Retry-After", async () => {
+    const schema = z.object({ q: z.string(), a: z.string() });
+    let fetches = 0;
+    const graphWith = (first: Response) => {
+      fetches = 0;
+      const model = openAICompatible({
+        baseURL: "http://x/v1",
+        model: "m",
+        fetch: async () => {
+          fetches += 1;
+          return fetches === 1 ? first : reply(200, okBody);
+        },
+      });
+      return createGraph(schema, {
+        start: "ask",
+        nodes: {
+          ask: LLMNode({
+            model,
+            prompt: (s) => s.q,
+            update: (s, text) => ({ ...s, a: text }),
+            retry: { maxAttempts: 3 },
+          }),
+        },
+        endNodes: ["ask"],
+      });
+    };
+
+    const error = await graphWith(reply(400, "bad request"))
+      .run({ q: "hi", a: "" })
+      .then(
+        () => undefined,
+        (e: unknown) => e,
+      );
+    expect((error as { cause?: unknown }).cause).toBeInstanceOf(HTTPError);
+    expect(fetches).toBe(1);
+
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const pending = graphWith(reply(429, "slow down", { "retry-after": "3" })).run({ q: "hi", a: "" });
+    await vi.advanceTimersByTimeAsync(2999);
+    expect(fetches).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    const { state, trace } = await pending;
+    expect(fetches).toBe(2);
+    expect(state.a).toBe("hi");
+    expect(trace.find((e) => e.type === "error")?.meta).toMatchObject({ willRetry: true, delayMs: 3000 });
+  });
+});
+
+describe("tokenLimit", () => {
+  it("puts maxTokens in the field it names", async () => {
+    const bodies: Record<string, unknown>[] = [];
+    const capture = async (_input: string | URL | Request, init?: RequestInit) => {
+      bodies.push(JSON.parse(String(init?.body)));
+      return reply(200, okBody);
+    };
+    const signal = new AbortController().signal;
+    const request = { messages: [{ role: "user" as const, content: "q" }], maxTokens: 50 };
+    const reasoning = openAICompatible({
+      baseURL: "http://x/v1",
+      model: "o3",
+      tokenLimit: "max_completion_tokens",
+      fetch: capture,
+    });
+    await reasoning.complete(request, { signal });
+    await openAICompatible({ baseURL: "http://x/v1", model: "m", fetch: capture }).complete(request, { signal });
+    expect(bodies[0]).toMatchObject({ max_completion_tokens: 50 });
+    expect(bodies[0]).not.toHaveProperty("max_tokens");
+    expect(bodies[1]).toMatchObject({ max_tokens: 50 });
+    expect(bodies[1]).not.toHaveProperty("max_completion_tokens");
+  });
+
+  it("refuses other values", () => {
+    expect(() => openAICompatible({ baseURL: "http://x/v1", model: "m", tokenLimit: "max" as never })).toThrow(
+      'openAICompatible: tokenLimit must be "max_tokens" or "max_completion_tokens", got max',
+    );
   });
 });
