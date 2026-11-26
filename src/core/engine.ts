@@ -426,20 +426,25 @@ function* runStep<S>(p: StepParams<S>): Effects<StepOutcome<S>> {
       const delayMs = willRetry && node.retry ? retryDelay(node.retry, attempt, thrown) : 0;
       // A write that timed out or was cut off may have happened anyway.
       const unknown = node.effect === "write" && (error.code === "TIMEOUT" || error.code === "ABORTED");
-      yield* record(log, {
-        type: "error",
-        nodeId,
-        step,
-        meta: {
-          attempt,
-          source,
-          code: error.code,
-          message: error.message,
-          willRetry,
-          ...(willRetry && { delayMs }),
-          ...(unknown && { outcome: "unknown" }),
-        },
-      });
+      try {
+        yield* record(log, {
+          type: "error",
+          nodeId,
+          step,
+          meta: {
+            attempt,
+            source,
+            code: error.code,
+            message: error.message,
+            willRetry,
+            ...(willRetry && { delayMs }),
+            ...(unknown && { outcome: "unknown" }),
+          },
+        });
+      } catch (failure) {
+        // An aborted run reports ABORTED, even if a sink listening to the same signal failed meanwhile.
+        if (!p.signal.aborted) throw failure;
+      }
       if (policyFailure) {
         const { cause } = policyFailure;
         const message = `Node "${nodeId}" (step ${step}): retry.retryOn threw: ${errorMessage(cause)}`;

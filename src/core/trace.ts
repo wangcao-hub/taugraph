@@ -78,9 +78,12 @@ export class TraceLog {
   pending(): Promise<void> | undefined {
     const tail = this.#tail;
     if (!tail) return undefined;
-    return tail.then(() => {
+    const done = tail.then(() => {
       if (this.#tail === tail) this.#tail = undefined;
     });
+    // An aborted run stops waiting without a handler; awaiting `done` still sees the rejection.
+    done.catch(() => {});
+    return done;
   }
 
   /** Stops calling the sink: `runSync` does this once the sink returned a Promise it cannot wait for. */
@@ -113,7 +116,13 @@ export class TraceLog {
     const sink = this.#onEvent;
     if (!sink) return;
     if (this.#tail) {
-      this.#chain(this.#tail.then(() => this.#call(sink, event)));
+      // Read the sink when the call is due, so detach() also stops calls queued before it.
+      this.#chain(
+        this.#tail.then(() => {
+          const due = this.#onEvent;
+          return due ? this.#call(due, event) : undefined;
+        }),
+      );
       return;
     }
     const result = this.#call(sink, event);

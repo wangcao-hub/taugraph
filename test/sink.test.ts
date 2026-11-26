@@ -167,4 +167,86 @@ describe("async onEvent", () => {
     expect(done.state.n).toBe(5);
     expect(second).toEqual(done.trace.slice(paused.trace.length).map((e) => e.seq));
   });
+
+  it("reports ABORTED and leaves no unhandled rejection when a sink fails after the abort", async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown) => unhandled.push(reason);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      // A: the sink rejects 40 ms after a tool_call, while the run was aborted at 10 ms.
+      const hangs = CodeNode<State>((_s, ctx) => {
+        ctx.trace.append({ type: "tool_call" });
+        return new Promise<State>(() => {});
+      });
+      const late = (e: TraceEvent) =>
+        e.type === "tool_call"
+          ? new Promise<void>((_resolve, reject) => setTimeout(() => reject(new Error("late")), 40))
+          : Promise.resolve();
+      const first = new AbortController();
+      const runA = single(hangs).run({ n: 0 }, { onEvent: late, signal: first.signal });
+      setTimeout(() => first.abort(), 10);
+      expect((await failure(runA)).code).toBe("ABORTED");
+
+      // B: the sink listens to the run's signal and rejects the exit write when the run is aborted.
+      const second = new AbortController();
+      const { signal } = second;
+      const listening = (e: TraceEvent) =>
+        e.type === "exit"
+          ? new Promise<void>((_resolve, reject) => {
+              signal.addEventListener("abort", () => reject(new Error("aborted write")));
+            })
+          : Promise.resolve();
+      const runB = single(CodeNode<State>((s) => s)).run({ n: 0 }, { onEvent: listening, signal });
+      setTimeout(() => second.abort(), 10);
+      expect((await failure(runB)).code).toBe("ABORTED");
+
+      await sleep(80);
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("stops calling the sink in runSync, also for events queued before it gave up", async () => {
+    const types: string[] = [];
+    const onEvent = (e: TraceEvent) => {
+      types.push(e.type);
+      return e.type === "tool_call" ? sleep(5) : undefined;
+    };
+    const node = CodeNode<State>((s, ctx) => {
+      ctx.trace.append({ type: "tool_call" });
+      ctx.trace.append({ type: "tool_call" });
+      return s;
+    });
+    let error: unknown;
+    try {
+      single(node).runSync({ n: 0 }, { onEvent });
+    } catch (e) {
+      error = e;
+    }
+    expect(isTaugraphError(error) && error.code).toBe("ASYNC_IN_SYNC_RUN");
+    await sleep(30);
+    expect(types).toEqual(["run_start", "enter", "tool_call"]);
+  });
+
+  it("stores events in order when a node is retried", async () => {
+    let attempts = 0;
+    const node = CodeNode<State>(
+      (s, ctx) => {
+        attempts++;
+        ctx.trace.append({ type: "tool_call", output: attempts });
+        if (attempts === 1) throw new Error("flaky");
+        return s;
+      },
+      { retry: { maxAttempts: 2, backoff: false } },
+    );
+    const stored: number[] = [];
+    const onEvent = async (e: TraceEvent) => {
+      await sleep(2);
+      stored.push(e.seq);
+    };
+    const { trace } = await single(node).run({ n: 0 }, { onEvent });
+    expect(attempts).toBe(2);
+    expect(stored).toEqual(trace.map((e) => e.seq));
+  });
 });
