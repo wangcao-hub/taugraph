@@ -176,13 +176,14 @@ describe("runtime", () => {
         if (calls < 3) throw new Error(`fail ${calls}`);
         return { ...s, count: calls };
       },
-      { retry: { maxAttempts: 3 } },
+      { retry: { maxAttempts: 3, backoff: false } },
     );
     const graph = createGraph(schema, { start: "flaky", nodes: { flaky }, endNodes: ["flaky"] });
     const result = await graph.run({ count: 0 });
     expect(result.state.count).toBe(3);
     const errors = result.trace.filter((e) => e.type === "error");
     expect(errors.map((e) => e.meta?.willRetry)).toEqual([true, true]);
+    expect(errors.map((e) => e.meta?.delayMs)).toEqual([0, 0]);
     expect(result.trace.filter((e) => e.type === "enter").map((e) => e.meta?.attempt)).toEqual([1, 2, 3]);
   });
 
@@ -194,7 +195,7 @@ describe("runtime", () => {
           () => {
             throw new Error("always");
           },
-          { retry: { maxAttempts: 2 } },
+          { retry: { maxAttempts: 2, backoff: false } },
         ),
       },
       endNodes: ["a"],

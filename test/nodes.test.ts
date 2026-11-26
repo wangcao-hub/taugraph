@@ -132,7 +132,7 @@ describe("LLMNode", () => {
           prompt: (s) => s.question,
           output: z.object({ score: z.number() }),
           update: (s, data) => ({ ...s, score: data.score }),
-          retry: { maxAttempts: 3 },
+          retry: { maxAttempts: 3, backoff: false },
         }),
       },
       endNodes: ["grade"],

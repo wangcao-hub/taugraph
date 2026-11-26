@@ -7,6 +7,7 @@
  * any async runtime, and both drivers share exactly the same semantics.
  */
 import { formatIssues, TaugraphError } from "./errors.js";
+import { FATAL, isRetryable, retryDelay } from "./retry.js";
 import type { StandardSchemaV1 } from "./standard-schema.js";
 import {
   deliveredValues,
@@ -19,7 +20,7 @@ import {
   TraceLog,
   tracePath,
 } from "./trace.js";
-import type { Node, PluginEvent, ReplayMode, RunContext, RunOptions, RunResult, Trace } from "./types.js";
+import type { Node, PluginEvent, ReplayMode, RetryPolicy, RunContext, RunOptions, RunResult, Trace } from "./types.js";
 import { freezeJson, isThenable, jsonEqual, NotJsonError, randomId } from "./util.js";
 
 export const DEFAULT_MAX_STEPS = 100;
@@ -82,8 +83,12 @@ type StepOutcome<S> =
   | { readonly kind: "exit"; readonly state: S }
   | { readonly kind: "pause"; readonly request: unknown };
 
-const NON_RETRYABLE = new Set(["ABORTED", "ASYNC_IN_SYNC_RUN", "INVALID_EVENT", "SINK_FAILED"]);
 const NEVER_ABORTED = new AbortController().signal;
+
+/** Yielded to wait before a retry: `run` sleeps, `runSync` blocks the thread. */
+class Wait {
+  constructor(readonly ms: number) {}
+}
 
 /** Thrown by `ctx.interrupt` to unwind the node. Detection does not rely on it propagating. */
 class PauseSignal extends Error {
@@ -323,16 +328,26 @@ function* runStep<S>(p: StepParams<S>): Effects<StepOutcome<S>> {
       return { kind: "exit", state: next };
     } catch (thrown) {
       const error = asNodeError(thrown, nodeId, step);
-      const willRetry = attempt < maxAttempts && !NON_RETRYABLE.has(error.code);
+      const willRetry = attempt < maxAttempts && shouldRetry(node, error, thrown);
+      const delayMs = willRetry && node.retry ? retryDelay(node.retry, attempt, thrown) : 0;
       log.append({
         type: "error",
         nodeId,
         step,
-        meta: { attempt, source, code: error.code, message: error.message, willRetry },
+        meta: { attempt, source, code: error.code, message: error.message, willRetry, ...(willRetry && { delayMs }) },
       });
       if (!willRetry) throw error;
+      if (delayMs > 0) yield new Wait(delayMs);
     }
   }
+}
+
+/** `retryOn` (or `isRetryable`) decides, except for a run that is stopping and for writes not declared idempotent. */
+function shouldRetry<S>(node: Node<S>, error: TaugraphError, thrown: unknown): boolean {
+  const retry: RetryPolicy | undefined = node.retry;
+  if (!retry || FATAL.has(error.code)) return false;
+  if (node.effect === "write" && retry.idempotent !== true) return false; // createGraph refuses these too
+  return (retry.retryOn ?? isRetryable)(thrown);
 }
 
 interface ContextParams {
@@ -362,7 +377,14 @@ function createContext(p: ContextParams): Control {
   };
 
   const ctx: RunContext = Object.freeze({
-    meta: Object.freeze({ runId: p.runId, nodeId, step, attempt: p.attempt, recovered: p.recovered }),
+    meta: Object.freeze({
+      runId: p.runId,
+      nodeId,
+      step,
+      attempt: p.attempt,
+      recovered: p.recovered,
+      idempotencyKey: `${p.runId}:${step}`,
+    }),
     signal: p.signal,
     trace: Object.freeze({
       append(event: PluginEvent) {
@@ -506,24 +528,46 @@ function describe(value: unknown): string {
 export function driveSync<T>(effects: Effects<T>): T {
   let next = effects.next();
   while (!next.done) {
-    if (isThenable(next.value)) {
-      Promise.resolve(next.value).catch(() => {}); // the result is discarded; avoid an unhandled rejection
+    const effect = next.value;
+    if (effect instanceof Wait) {
+      let failure: TaugraphError | undefined;
+      try {
+        blockFor(effect.ms);
+      } catch (error) {
+        failure = error as TaugraphError;
+      }
+      next = failure ? effects.throw(failure) : effects.next(undefined);
+    } else if (isThenable(effect)) {
+      Promise.resolve(effect).catch(() => {}); // the result is discarded; avoid an unhandled rejection
       next = effects.throw(
         new TaugraphError("ASYNC_IN_SYNC_RUN", "runSync() received a Promise. Use run() for async nodes or schemas."),
       );
     } else {
-      next = effects.next(next.value);
+      next = effects.next(effect);
     }
   }
   return next.value;
 }
 
+/** Blocks the thread for `ms`. Throws ASYNC_IN_SYNC_RUN where blocking is not allowed, such as a browser's main thread. */
+function blockFor(ms: number): void {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  } catch (cause) {
+    throw new TaugraphError("ASYNC_IN_SYNC_RUN", `runSync() cannot wait ${ms}ms before retrying here; use run()`, {
+      cause,
+    });
+  }
+}
+
 export async function driveAsync<T>(effects: Effects<T>, signal?: AbortSignal): Promise<T> {
   let next = effects.next();
   while (!next.done) {
+    const effect = next.value;
     let value: unknown;
     try {
-      value = isThenable(next.value) ? await abortable(next.value, signal) : next.value;
+      if (effect instanceof Wait) value = await sleep(effect.ms, signal);
+      else value = isThenable(effect) ? await abortable(effect, signal) : effect;
     } catch (error) {
       next = effects.throw(error);
       continue;
@@ -531,6 +575,22 @@ export async function driveAsync<T>(effects: Effects<T>, signal?: AbortSignal): 
     next = effects.next(value);
   }
   return next.value;
+}
+
+/** Resolves after `ms`, or rejects with ABORTED as soon as the signal fires. */
+function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
+  if (signal?.aborted) return Promise.reject(abortError(signal));
+  return new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError(signal as AbortSignal));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 /** Stops waiting as soon as the signal fires, even if the node ignores the signal. */

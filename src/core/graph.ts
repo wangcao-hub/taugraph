@@ -8,6 +8,7 @@ import {
   toJson,
 } from "./engine.js";
 import { TaugraphError } from "./errors.js";
+import { nodeMetaProblem } from "./node.js";
 import type { StandardSchemaV1 } from "./standard-schema.js";
 import { assertTrace, recordedAnswers, recordedSteps, resumePoint } from "./trace.js";
 import type { Graph, GraphDefinition, Node, ReplayOptions, ResumeOptions, RunOptions, Trace } from "./types.js";
@@ -119,7 +120,10 @@ function compile<S>(schema: StandardSchemaV1<unknown, S>, def: GraphDefinition<S
   const ids = Object.keys(nodes);
   if (ids.length === 0) fail("Graph has no nodes");
   for (const id of ids) {
-    if (typeof nodes[id] !== "function") fail(`Node "${id}" is not a function`);
+    const node = nodes[id];
+    if (typeof node !== "function") fail(`Node "${id}" is not a function`);
+    const problem = nodeMetaProblem(node as Node<S>);
+    if (problem !== undefined) fail(`createGraph: node "${id}": ${problem}`);
   }
   const exists = (id: unknown): id is string => typeof id === "string" && Object.hasOwn(nodes, id);
   const requireNode = (id: unknown, role: string): string => {

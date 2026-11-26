@@ -5,6 +5,7 @@ export type { TaugraphErrorCode, TaugraphErrorDetails } from "./core/errors.js";
 export { isTaugraphError, TaugraphError } from "./core/errors.js";
 export { createGraph } from "./core/graph.js";
 export { defineNode } from "./core/node.js";
+export { isRetryable } from "./core/retry.js";
 export type { StandardSchemaV1 } from "./core/standard-schema.js";
 export type { RecordedStep, RunStatus, TraceDiff } from "./core/trace.js";
 export {
@@ -38,6 +39,7 @@ export type {
   ReplayMode,
   ReplayOptions,
   ResumeOptions,
+  RetryBackoff,
   RetryPolicy,
   RunContext,
   RunOptions,

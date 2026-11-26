@@ -64,6 +64,11 @@ export interface RunContext {
      * and `resume` started it again. A write node should check whether its effect already happened.
      */
     readonly recovered: boolean;
+    /**
+     * `<runId>:<step>`: the same for every attempt of this step, and when a crashed step is restarted. Pass it to an
+     * API that deduplicates (an `Idempotency-Key` header, say) so a retried write takes effect once.
+     */
+    readonly idempotencyKey: string;
   };
   /** Aborted when the caller cancels the run. Pass it to fetch / model clients. */
   readonly signal: AbortSignal;
@@ -81,9 +86,29 @@ export interface RunContext {
   interrupt<T = unknown>(request?: unknown): T;
 }
 
+export interface RetryBackoff {
+  /** Wait before the first retry, in milliseconds. Default 500. */
+  readonly initialMs?: number;
+  /** Each further retry waits this many times longer. Default 2. */
+  readonly factor?: number;
+  /** Upper bound for the computed wait. Default 30_000. A longer `retryAfterMs` on the error still wins. */
+  readonly maxMs?: number;
+  /** Share of each wait taken off at random, 0 to 1. Default 0.5: a wait is 50% to 100% of the computed one. */
+  readonly jitter?: number;
+}
+
 export interface RetryPolicy {
   /** Total attempts including the first one. Must be an integer >= 1. */
   readonly maxAttempts: number;
+  /** Wait between attempts. Default `{ initialMs: 500, factor: 2, maxMs: 30_000, jitter: 0.5 }`; `false` retries at once. */
+  readonly backoff?: false | RetryBackoff;
+  /** Whether an error is worth another attempt. Gets the error the node threw. Default: `isRetryable`. */
+  readonly retryOn?: (error: unknown) => boolean;
+  /**
+   * Required on `write` nodes with a retry policy: repeating the node is safe, for example because it passes
+   * `ctx.meta.idempotencyKey` to an API that deduplicates.
+   */
+  readonly idempotent?: boolean;
 }
 
 /** Receives the current (deeply frozen) state and returns a brand-new state. */
