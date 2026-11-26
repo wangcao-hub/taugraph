@@ -74,7 +74,7 @@ export interface RetryPolicy {
 
 ### 3.2 语义
 
-- 每个节点得到自己的 `ctx.signal`：运行的中止信号和这个节点的超时信号合并（`AbortSignal.any`）。超时时这个信号被触发，原因为 `TIMEOUT` 错误。
+- 每个节点得到自己的 `ctx.signal`：运行的中止信号和这个节点的超时信号合并（手动组合，每次尝试结束时移除监听；`AbortSignal.any` 挂在长期存在的信号上会越积越多）。超时时这个信号被触发，原因为 `TIMEOUT` 错误。
 - 节点返回的 Promise 在 `timeoutMs` 内没有完成时，内核不再等它，这一步失败，错误码 `TIMEOUT`，信息 `Node "<id>" (step <n>) timed out after <ms>ms`。`TIMEOUT` 可以重试（写操作节点只在 `idempotent: true` 时）。
 - 写操作节点因超时或中止而停下时，`error` 事件的 `meta` 带 `outcome: "unknown"`。
 - 超时之后节点才返回的结果被丢弃；它之后追加的 trace 事件照常报"步骤已结束"，不影响运行；它之后的 reject 不会变成未处理的 Promise 拒绝。
