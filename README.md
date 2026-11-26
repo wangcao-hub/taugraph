@@ -80,7 +80,7 @@ flowchart LR
 
 <sub>The checkout conversation replayed with an over-eager classifier. Steps 0 and 1 come from the trace, including the person's answer. The new model reads "make it 2" as a confirmation, so the run would now place an order; the replay stops there instead.</sub>
 
-3. **Replays don't repeat side effects unless you say so.** `effect: "write"` is part of the node, not a convention. Replays, and resumed replays, refuse to run a write node live unless you override it or pass `allowWrites: true`. A write that was running when the process died becomes `UNKNOWN_OUTCOME`, never a silent retry.
+3. **Replays don't repeat side effects unless you say so.** `effect: "write"` is part of the node, not a convention. Replays, and resumed replays, refuse to run a write node live unless you override it or pass `allowWrites: true`. A write that was running when the process died becomes `UNKNOWN_OUTCOME`, never a silent retry, and a failed write is retried only when it is declared idempotent.
 4. **Conversations become test cases.** Human answers are stored in the trace as inputs. Replaying a human-in-the-loop run needs no human: each `ctx.interrupt` gets its recorded answer as long as the step sees the recorded state. (LangGraph fires interrupts again on replay.)
 5. **Models choose, code routes.** Routers are synchronous functions of the state; an async router is rejected at run time. A model can only write a schema-checked value into state, such as one of four commands, and the edge reads it. A router cannot await a model call, so model decisions happen in nodes, where the trace records them.
 
@@ -175,7 +175,7 @@ State must be plain JSON (no `Date`, `Map`, class instances). That is what makes
 type Node<S> = (state: S, ctx: RunContext) => S | Promise<S>;
 
 interface RunContext {
-  meta: { runId: string; nodeId: string; step: number; attempt: number; recovered: boolean };
+  meta: { runId: string; nodeId: string; step: number; attempt: number; recovered: boolean; idempotencyKey: string };
   signal: AbortSignal; // pass it to fetch / model clients
   trace: { append(event: PluginEvent): void }; // record a side effect
   interrupt<T>(request?: unknown): T; // pause the run until resume(trace, value)
@@ -207,7 +207,7 @@ run_start → enter → [llm_call | tool_call | ...] → exit → enter → paus
 
 Consecutive snapshots share whatever did not change. In memory this always holds; on disk it holds when you write with `toJSONL`, `createTraceEncoder` or `fileStore`. These write format v2, which stores each snapshot as a patch against the one before, so a trace grows with what changed rather than with the size of the state. That holds for items appended to arrays and for changes to object keys; inserting at the front of a long array or reordering an object's keys still rewrites that array or object.
 
-`run(input, { onEvent })` hands every event to your sink before the run continues. If the sink throws, the run stops with `SINK_FAILED`, so no step runs without being logged. Full spec: [docs/trace-format.md](./docs/trace-format.md).
+`run(input, { onEvent })` hands every event to your sink before the run continues. The sink may return a Promise: `run` waits for it after every kernel event, so a `write` step's `enter` is stored before the node runs, and the events a node appends are stored before its step ends. Calls never overlap. If the sink throws or rejects, the run stops with `SINK_FAILED`, so no step runs without being logged. `runSync` takes synchronous sinks only. Full spec: [docs/trace-format.md](./docs/trace-format.md).
 
 ### Pause and resume
 
@@ -241,7 +241,16 @@ Typical uses: swap a model and compare answers, mock a flaky tool, rerun a faile
 
 ### Errors and retries
 
-Every failure is a `TaugraphError` with a `code` (`INVALID_GRAPH`, `INVALID_STATE`, `INVALID_ROUTE`, `NODE_FAILED`, `MAX_STEPS`, `ABORTED`, `ASYNC_IN_SYNC_RUN`, `INVALID_TRACE`, `INVALID_EVENT`, `WRITE_BLOCKED`, `UNKNOWN_OUTCOME`, `NOT_RESUMABLE`, `SINK_FAILED`), plus `nodeId`, `step`, schema `issues`, the original `cause`, and the `trace` up to the failure. Nodes can opt into retries: `CodeNode(fn, { retry: { maxAttempts: 3 } })`. Each failed attempt is an `error` event.
+Every failure is a `TaugraphError` with a `code` (`INVALID_GRAPH`, `INVALID_STATE`, `INVALID_ROUTE`, `NODE_FAILED`, `MAX_STEPS`, `ABORTED`, `TIMEOUT`, `ASYNC_IN_SYNC_RUN`, `INVALID_TRACE`, `INVALID_EVENT`, `WRITE_BLOCKED`, `UNKNOWN_OUTCOME`, `NOT_RESUMABLE`, `SINK_FAILED`), plus `nodeId`, `step`, schema `issues`, the original `cause`, and the `trace` up to the failure.
+
+```ts
+CodeNode(fetchPrices, { retry: { maxAttempts: 4 }, timeoutMs: 10_000 });
+```
+
+- **What is retried.** By default `isRetryable(error)` decides. Kernel errors that another attempt cannot fix (`INVALID_STATE`, `ABORTED`, `SINK_FAILED`, ...) are not retried, and neither are HTTP 4xx errors other than 408, 409, 425 and 429, read from a numeric `status` on the error or its `cause` chain. Everything else is retried, including errors it knows nothing about. Pass `retryOn(error)` to decide yourself; it gets the error the node threw.
+- **How long it waits.** Exponential backoff: 500 ms, twice as long each time, at most 30 s, minus up to half at random (`backoff: { initialMs, factor, maxMs, jitter }`, or `false` to retry at once). A `retryAfterMs` on the error, which `taugraph/openai` reads from `Retry-After`, makes it wait at least that long. `run` waits with a timer and stops at once when aborted; `runSync` blocks the thread, and fails with `ASYNC_IN_SYNC_RUN` where it may not (a browser's main thread). Each failed attempt is an `error` event with `willRetry` and `delayMs`.
+- **Write nodes.** A `write` node with `retry` must set `idempotent: true`, or `defineNode` throws: a repeated order is a second order. `ctx.meta.idempotencyKey` (`<runId>:<step>`) is the same for every attempt of a step and after a crash; pass it to the API (as an `Idempotency-Key` header, say) so repeats are safe.
+- **Timeouts.** `timeoutMs` on a node fails the attempt with `TIMEOUT` when its Promise has not settled in time, and aborts `ctx.signal`. `TIMEOUT` is retried like other errors. Synchronous code cannot be interrupted. When a `write` node stops on a timeout or an abort, its `error` event says `outcome: "unknown"`: the effect may or may not have happened.
 
 ## Plugin nodes (`taugraph/nodes`)
 
@@ -320,6 +329,7 @@ think ──no calls, or maxRounds──▶ finish
 - Tool definitions follow MCP (`name`, `description`, `inputSchema` as JSON Schema). A tool's JSON Schema comes from `inputSchema` if given, else from `input` through [Standard JSON Schema](https://standardschema.dev/json-schema) (Zod 4, Valibot, ArkType).
 - Invalid arguments, unknown tools, unreadable arguments and thrown errors go back to the model as error results; the loop continues.
 - `maxRounds` (default 8) bounds model calls; at most 32 calls run per reply. Each tool run is a `tool_call` event.
+- `timeoutMs` on `createAgent` limits each model call (`TIMEOUT`, which `retry` retries). `timeoutMs` on a tool limits each run of it: a read tool that takes longer answers the model with an error and the loop goes on; a write tool fails the run with `TIMEOUT`, because its effect is unknown.
 - Models: the call contract gained optional `tools`, `toolChoice` and `toolCalls`, and `tool` messages. An adapter that maps `role` itself needs a `tool` branch. The [OpenAI-compatible adapter](#openai-compatible-models-taugraphopenai) translates them. `pnpm example:agent` runs the whole thing. Tool results may carry images (see [Images](#images)).
 
 ## OpenAI-compatible models (`taugraph/openai`)
@@ -344,9 +354,12 @@ const model = openAICompatible({
 | `resolveImage`    | Reads image references such as `media:abc` when a request is sent; see [Images](#images)             |
 | `reasoningParams` | Maps a reasoning level to request parameters; see [Reasoning models](#reasoning-models)              |
 | `sendReasoning`   | `false` stops sending the model's own reasoning back, for endpoints that refuse the field            |
-| `fetch`           | Used instead of the global `fetch`, e.g. for a proxy, retries or tests                               |
+| `tokenLimit`      | `"max_completion_tokens"` for OpenAI's reasoning models; default `"max_tokens"`                      |
+| `fetch`           | Used instead of the global `fetch`, e.g. for a proxy or tests                                        |
 
 The model's `id` is `openai-compatible:<model>`. It is recorded in every `llm_call` event, and assistant messages with that `model` count as this model's own when reasoning is sent back.
+
+A response outside 2xx throws `HTTPError` with `status`, `url` and `retryAfterMs` (read from `Retry-After`), so an `LLMNode` with `retry` retries 429 and 5xx, waiting at least as long as `Retry-After` asks, and gives up on other 4xx at once.
 
 Any other provider fits the same contract through a small adapter of your own: an `LLMModel` is `{ id, complete(request, { signal }) }`.
 

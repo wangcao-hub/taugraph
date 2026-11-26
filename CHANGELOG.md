@@ -6,19 +6,27 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [0.4.0] - 2026-11-25
 
-Traces grow linearly instead of with the square of the run, in memory and in JSONL (format version 2), and `taugraph/file` stores them as crash-safe files that a restarted process can continue.
+Traces grow linearly instead of with the square of the run, in memory and in JSONL (format version 2), and `taugraph/file` stores them as crash-safe files that a restarted process can continue. Retries now wait and skip errors that cannot heal, nodes and tools can time out, and `onEvent` can be async.
 
 ### Changed
 
 - **Breaking:** trace format version 2: `toJSONL` writes each `input` / `output` as a JSON Patch against a base value when the patch is under 4096 characters or not longer than the value, so traces grow with what changed instead of with the square of the run. That holds for items appended to arrays and for changes to object keys; inserting at the front of a long array or reordering an object's keys still rewrites that array or object. `fromJSONL`, `resume` and `replay` read versions 1 and 2. In memory, events keep their shape, and consecutive states share the parts that did not change. taugraph 0.3 and older reject version 2 files. Code that parses `toJSONL` or `fileStore` lines itself now meets `inputPatch` / `outputPatch` instead of `input` / `output`, so read them with `fromJSONL` from 0.4. Custom sinks now see `run_start.meta.version` 2, which taugraph 0.3 rejects, so even files they write in full no longer load there.
+- **Breaking:** retries wait between attempts: exponential backoff from 500 ms, doubling up to 30 s, minus up to half at random, or at least the error's `retryAfterMs`. Pass `backoff: false` for the old immediate retries. `runSync` blocks the thread for the wait, and fails with `ASYNC_IN_SYNC_RUN` where it may not block.
+- **Breaking:** errors that another attempt cannot fix are no longer retried: HTTP 4xx other than 408, 409, 425 and 429 (a numeric `status` on the error or its `cause` chain), and the codes `INVALID_STATE`, `INVALID_ROUTE`, `WRITE_BLOCKED`, `UNKNOWN_OUTCOME` and `NOT_RESUMABLE`. A node that returns invalid state now fails at once; pass `retryOn` to keep retrying it.
+- **Breaking:** a `write` node with `retry` must set `retry.idempotent: true`. Otherwise `defineNode` throws a `TypeError`, and `createGraph` an `INVALID_GRAPH` error for nodes built without `defineNode`.
 - `toJSONL([])` returns `""` (was `"\n"`).
 - `fromJSONL` returns frozen `input` / `output` values; events and their `meta` stay plain objects.
 - `freezeJson` (state and payload checks) now rejects arrays with holes (`INVALID_STATE`; before, holes became `null` on disk), and a `__proto__` key in state is kept as an ordinary key.
+- `taugraph/openai` throws `HTTPError` (with `status`, `url` and `retryAfterMs`) instead of a plain `Error` for responses outside 2xx. The message is unchanged. `String(error)` now starts with `HTTPError:`.
 
 ### Added
 
 - `taugraph/file`: `fileStore(dir, { durability })` stores one JSONL file per run, appended before each step continues; `load` ignores a half-written last line, and continuing a run cuts it off; a lock file per run keeps two processes on one machine from writing the same run; `list()` reports `running`, `interrupted`, `paused`, `completed` or `failed`. `durability` is `"writes"` (default: fsync before write steps, at pauses and at the end), `"every"` or `"none"`.
 - `runStatus(trace)`, `createTraceEncoder(prefix)`, `toJSONL(trace, { from })` and `fromJSONL(text, { tornTail: "drop" })`.
+- Retry policy: `backoff`, `retryOn` and `idempotent` on `RetryPolicy`; `isRetryable(error)`, the default rule; `ctx.meta.idempotencyKey` (`<runId>:<step>`); `delayMs` in `error` events.
+- Timeouts: `timeoutMs` on nodes (`defineNode`, `CodeNode`, `LLMNode`), on `createAgent` for each model call, and on agent tools. An attempt that times out fails with the new code `TIMEOUT`, which is retryable, and its `ctx.signal` aborts. A `write` node that stopped on a timeout or an abort has `outcome: "unknown"` in its `error` event. A read tool that times out answers the model with an error; a write tool fails the run.
+- Async sinks: `onEvent` may return a Promise. `run` awaits it after each kernel event and awaits the events a node appended before the step's `exit`; calls never overlap; a rejection stops the run with `SINK_FAILED`. `runSync` refuses an async sink with `ASYNC_IN_SYNC_RUN`.
+- `taugraph/openai`: `tokenLimit: "max_completion_tokens"` for OpenAI's reasoning models.
 
 ## [0.3.0] - 2026-11-25
 

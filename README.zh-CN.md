@@ -80,7 +80,7 @@ flowchart LR
 
 <sub>用一个过于激进的分类模型回放 checkout 对话。第 0、1 步来自 trace，包括用户当时的回答。新模型把 "make it 2" 当成了确认，这次运行本来会下单，回放在这里停下，没有真的下单。</sub>
 
-3. **回放默认不会重复副作用。** `effect: "write"` 是节点的一部分，不是约定。回放以及恢复中的回放都不会实际执行写节点，除非你覆盖它或传 `allowWrites: true`。进程崩溃时正在执行的写操作会变成 `UNKNOWN_OUTCOME`，不会被悄悄重试。
+3. **回放默认不会重复副作用。** `effect: "write"` 是节点的一部分，不是约定。回放以及恢复中的回放都不会实际执行写节点，除非你覆盖它或传 `allowWrites: true`。进程崩溃时正在执行的写操作会变成 `UNKNOWN_OUTCOME`，不会被悄悄重试；失败的写操作只有声明了幂等才会重试。
 4. **对话直接变成测试用例。** 人工回答作为输入记在 trace 里。回放带人工交互的运行不需要有人在场：只要步骤看到的状态和录制时一致，每个 `ctx.interrupt` 都拿到当时的回答。（LangGraph 回放时会重新触发 interrupt。）
 5. **模型只做选择，路由交给代码。** 路由是基于状态的同步函数，异步路由在运行时会被拒绝。模型只能往状态里写一个经过 schema 校验的值，比如四个命令之一，再由边读取这个值。路由里没法 await 模型调用，所以模型的决策只能发生在节点里，并由 trace 记录下来。
 
@@ -175,7 +175,7 @@ error.message; // Node "answer" (step 1) returned invalid state:
 type Node<S> = (state: S, ctx: RunContext) => S | Promise<S>;
 
 interface RunContext {
-  meta: { runId: string; nodeId: string; step: number; attempt: number; recovered: boolean };
+  meta: { runId: string; nodeId: string; step: number; attempt: number; recovered: boolean; idempotencyKey: string };
   signal: AbortSignal; // 传给 fetch / 模型客户端
   trace: { append(event: PluginEvent): void }; // 记录一次副作用
   interrupt<T>(request?: unknown): T; // 暂停运行，直到 resume(trace, value)
@@ -207,7 +207,7 @@ run_start → enter → [llm_call | tool_call | ...] → exit → enter → paus
 
 相邻的快照共享没有变化的部分。内存里总是如此；用 `toJSONL`、`createTraceEncoder` 或 `fileStore` 写到磁盘上时也如此。它们写出 v2 格式，每个快照存成相对上一个快照的改动，所以 trace 随变化的多少增长，而不是随状态的大小增长。这一点对往数组末尾追加元素和修改对象的键成立；在长数组开头插入元素，或者调换对象键的顺序，仍然会把那个数组或对象整个重写一遍。
 
-`run(input, { onEvent })` 会在运行继续之前把每个事件交给你的 sink。sink 抛错时运行以 `SINK_FAILED` 停止，保证没有哪一步是在没写日志的情况下执行的。完整格式见 [docs/trace-format.md](./docs/trace-format.md)。
+`run(input, { onEvent })` 会在运行继续之前把每个事件交给你的 sink。sink 可以返回 Promise：`run` 在每个内核事件之后等它完成，所以写操作步骤的 `enter` 在节点执行前就已存好，节点追加的事件在这一步结束前存好。两次调用不会重叠。sink 抛错或 reject 时运行以 `SINK_FAILED` 停止，保证没有哪一步是在没写日志的情况下执行的。`runSync` 只接受同步的 sink。完整格式见 [docs/trace-format.md](./docs/trace-format.md)。
 
 ### 暂停与恢复
 
@@ -241,7 +241,16 @@ graph.replay(trace, { overrides?, mode?: "recorded" | "live", allowWrites? })
 
 ### 错误与重试
 
-所有失败都是 `TaugraphError`，带 `code`（`INVALID_GRAPH`、`INVALID_STATE`、`INVALID_ROUTE`、`NODE_FAILED`、`MAX_STEPS`、`ABORTED`、`ASYNC_IN_SYNC_RUN`、`INVALID_TRACE`、`INVALID_EVENT`、`WRITE_BLOCKED`、`UNKNOWN_OUTCOME`、`NOT_RESUMABLE`、`SINK_FAILED`），以及 `nodeId`、`step`、schema `issues`、原始 `cause`，还有截至失败时的 `trace`。节点可以声明重试：`CodeNode(fn, { retry: { maxAttempts: 3 } })`，每次失败都记录为一条 `error` 事件。
+所有失败都是 `TaugraphError`，带 `code`（`INVALID_GRAPH`、`INVALID_STATE`、`INVALID_ROUTE`、`NODE_FAILED`、`MAX_STEPS`、`ABORTED`、`TIMEOUT`、`ASYNC_IN_SYNC_RUN`、`INVALID_TRACE`、`INVALID_EVENT`、`WRITE_BLOCKED`、`UNKNOWN_OUTCOME`、`NOT_RESUMABLE`、`SINK_FAILED`），以及 `nodeId`、`step`、schema `issues`、原始 `cause`，还有截至失败时的 `trace`。
+
+```ts
+CodeNode(fetchPrices, { retry: { maxAttempts: 4 }, timeoutMs: 10_000 });
+```
+
+- **哪些错误会重试。** 默认由 `isRetryable(error)` 判断。重试也修不好的内核错误（`INVALID_STATE`、`ABORTED`、`SINK_FAILED` 等）不重试；HTTP 4xx 也不重试，但 408、409、425、429 除外，状态码取自错误本身或它的 `cause` 链上的数字 `status`。其他错误都重试，包括它不认识的错误。想自己判断就传 `retryOn(error)`，它收到的是节点抛出的原始错误。
+- **等多久。** 指数退避：先等 500 毫秒，之后每次翻倍，最多 30 秒，再随机减去最多一半（`backoff: { initialMs, factor, maxMs, jitter }`，设为 `false` 则立即重试）。错误上带 `retryAfterMs` 时至少等这么久，`taugraph/openai` 会从 `Retry-After` 读出它。`run` 用定时器等待，运行被中止时立即停止；`runSync` 会阻塞线程，在不允许阻塞的地方（浏览器主线程）报 `ASYNC_IN_SYNC_RUN`。每次失败都记为一条 `error` 事件，带 `willRetry` 和 `delayMs`。
+- **写操作节点。** `write` 节点配了 `retry` 就必须写 `idempotent: true`，否则 `defineNode` 报错：重复下单就是第二笔订单。`ctx.meta.idempotencyKey`（`<runId>:<step>`）在同一步的每次尝试里都相同，崩溃后恢复时也相同；把它传给外部接口（比如作为 `Idempotency-Key` 请求头），重复执行就是安全的。
+- **超时。** 节点上的 `timeoutMs` 让 Promise 没有按时完成的这次尝试以 `TIMEOUT` 失败，并中止 `ctx.signal`。`TIMEOUT` 和其他错误一样会重试。同步代码无法被打断。`write` 节点因超时或中止停下时，它的 `error` 事件带 `outcome: "unknown"`：副作用可能发生了，也可能没有。
 
 ## 插件节点（`taugraph/nodes`）
 
@@ -320,6 +329,7 @@ think ──没有调用，或到了 maxRounds──▶ finish
 - 工具定义沿用 MCP 的字段（`name`、`description`，`inputSchema` 是 JSON Schema）。给了 `inputSchema` 就用它，否则通过 [Standard JSON Schema](https://standardschema.dev/json-schema) 从 `input` 生成（Zod 4、Valibot、ArkType）。
 - 参数不合 schema、工具不存在、参数读不懂、工具抛错，都作为错误结果交回模型，循环继续。
 - `maxRounds`（默认 8）限制模型调用次数；一次回复最多执行 32 个调用。每次工具执行是一条 `tool_call` 事件。
+- `createAgent` 的 `timeoutMs` 限制每次模型调用（超时报 `TIMEOUT`，`retry` 会重试）。工具的 `timeoutMs` 限制它的每次执行：只读工具超时，把错误结果交回模型，循环继续；写操作工具超时，运行以 `TIMEOUT` 失败，因为副作用是否发生无从知道。
 - 模型接口新增可选的 `tools`、`toolChoice`、`toolCalls`，以及 `tool` 消息（自己转换 `role` 的适配器要补一个 `tool` 分支）；[OpenAI 兼容适配器](#openai-兼容模型taugraphopenai) 负责转换。`pnpm example:agent` 能把整套跑一遍。工具结果可以带图片（见[图片](#图片)）。
 
 ## OpenAI 兼容模型（`taugraph/openai`）
@@ -344,9 +354,12 @@ const model = openAICompatible({
 | `resolveImage`    | 发请求时读取 `media:abc` 这类图片引用，见[图片](#图片)                                          |
 | `reasoningParams` | 把思考档位换成请求参数，见[思考型模型](#思考型模型)                                             |
 | `sendReasoning`   | 设为 `false` 时不再把模型自己的思考发回，用于拒收这个字段的接口                                 |
-| `fetch`           | 代替全局的 `fetch`，用于代理、重试或测试                                                        |
+| `tokenLimit`      | OpenAI 的推理模型要用 `"max_completion_tokens"`；默认 `"max_tokens"`                            |
+| `fetch`           | 代替全局的 `fetch`，用于代理或测试                                                              |
 
 模型的 `id` 是 `openai-compatible:<model>`。它会记进每条 `llm_call` 事件；`model` 等于它的 assistant 消息算作这个模型自己的，回传思考时据此判断。
+
+响应不是 2xx 时抛 `HTTPError`，带 `status`、`url` 和 `retryAfterMs`（从 `Retry-After` 读出），所以配了 `retry` 的 `LLMNode` 会重试 429 和 5xx，等待时间不短于 `Retry-After` 的要求，遇到其他 4xx 立即放弃。
 
 其他服务商写一个小适配器就能接入同一个契约：`LLMModel` 就是 `{ id, complete(request, { signal }) }`。
 

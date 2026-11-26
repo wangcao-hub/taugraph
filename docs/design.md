@@ -45,6 +45,16 @@ Re-running every node on replay would call real models and tools again, which co
 
 Recorded mode alone is not enough: once the state diverges, downstream nodes run live, and if one of them places an order, every replay places another. Nodes therefore declare `effect: "write"`, and a replay refuses to run such a node live unless it is overridden or the caller passes `allowWrites: true`. There are two levels because the kernel only needs to know one thing: is it safe to run this again? Finer business distinctions (reversible or not, needs confirmation or not) belong in the graph.
 
+## Retries are decided by status, and declared for writes
+
+A retry runs the node again, so for a `write` node it repeats the effect: a second order, a second email. The kernel cannot know whether an API deduplicates, so a write node with `retry` must say `idempotent: true`, and `ctx.meta.idempotencyKey` (`<runId>:<step>`, the same for every attempt and after a crash) gives it a key to deduplicate on. Failing in `defineNode` catches the mistake where it is written instead of in production.
+
+Which errors to retry is read from data, not from error classes: a numeric `status` on the error or its `cause` chain. HTTP clients and SDKs all put the status somewhere like that, while their error classes have nothing in common and the kernel cannot import them. A 4xx means the request itself is wrong, except 408, 409, 425 and 429, which mean "later". Unknown errors are retried, because most of them are network failures. Waits back off exponentially with jitter, so clients that failed together do not all come back at the same moment, and a `retryAfterMs` from the server wins because the server knows its own load. `runSync` blocks with `Atomics.wait`, so a retry policy means the same in both drivers.
+
+## Timeouts stop the wait and abort the signal
+
+A node's `timeoutMs` does two things at once. The kernel stops waiting for the node's Promise, which bounds the run even when the node ignores its signal, and it aborts `ctx.signal`, which lets a well-behaved node cancel its request. JavaScript cannot interrupt synchronous code, so the limit only covers Promises. A write that timed out may still complete on the other side, so its `error` event says `outcome: "unknown"` and the run fails rather than guessing. The agent applies the same rule to tools: a read tool's timeout is one more error result for the model, a write tool's timeout stops the run.
+
 ## The trace is the checkpoint
 
 Pausing for a human usually means a checkpointer: a storage backend that snapshots state so the run can continue later. taugraph already records the state at every step, so `resume(trace, value)` rebuilds the position from the trace and continues it under the same runId. No storage interface enters the kernel; users keep the trace wherever they like.
@@ -55,7 +65,7 @@ The same function recovers a trace that ended mid-run, for example after a crash
 
 ## The log is written ahead
 
-`onEvent` is called before the run continues, and a sink failure stops the run with `SINK_FAILED`. Otherwise a step could run, perhaps a write, after the event that announced it was lost, and the stored trace could no longer be resumed correctly. The sink is synchronous to keep `runSync` possible; buffer in the sink if your storage is asynchronous and you accept the weaker guarantee.
+`onEvent` is called before the run continues, and a sink failure stops the run with `SINK_FAILED`. Otherwise a step could run, perhaps a write, after the event that announced it was lost, and the stored trace could no longer be resumed correctly. The sink may be asynchronous, so the guarantee also holds for a database or an object store: `run` waits for it after every kernel event, and waits for the events a node appended before writing the step's `exit`. Calls run one at a time, in order, because a sink that stored event 5 while event 4 was still in flight could leave a gap that `resume` cannot read past. Events from `ctx.trace.append` are queued instead of awaited one by one, since `append` is synchronous; a failure among them fails the step they belong to. `runSync` refuses an async sink rather than quietly weakening the guarantee.
 
 ## Traces grow with what changed
 
