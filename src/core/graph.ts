@@ -92,6 +92,8 @@ export function createGraph<S, I, K extends string>(
         if (node !== undefined && typeof node !== "function") {
           throw new TaugraphError("INVALID_GRAPH", `Override for node "${id}" is not a function`);
         }
+        const problem = node === undefined ? undefined : nodeMetaProblem(node);
+        if (problem !== undefined) throw new TaugraphError("INVALID_GRAPH", `Override for node "${id}": ${problem}`);
       }
       const mode = options.mode ?? "recorded";
       const replay = {

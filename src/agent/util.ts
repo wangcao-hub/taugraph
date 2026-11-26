@@ -43,6 +43,7 @@ export interface Deadline {
   dispose(): void;
 }
 
+/** Composed by hand: `AbortSignal.any` keeps every combination alive on a long-lived parent signal. */
 export function deadline(parent: AbortSignal, ms: number, error: Error): Deadline {
   const timer = new AbortController();
   let expire: ((reason: unknown) => void) | undefined;
@@ -50,8 +51,14 @@ export function deadline(parent: AbortSignal, ms: number, error: Error): Deadlin
     timer.abort(error);
     expire?.(error);
   }, ms);
+  const onAbort = () => {
+    clearTimeout(handle);
+    timer.abort(parent.reason);
+  };
+  if (parent.aborted) onAbort();
+  else parent.addEventListener("abort", onAbort, { once: true });
   return {
-    signal: AbortSignal.any([parent, timer.signal]),
+    signal: timer.signal,
     error,
     race<T>(value: PromiseLike<T>): Promise<T> {
       return new Promise<T>((resolve, reject) => {
@@ -59,6 +66,9 @@ export function deadline(parent: AbortSignal, ms: number, error: Error): Deadlin
         Promise.resolve(value).then(resolve, reject); // a late rejection is dropped, never unhandled
       });
     },
-    dispose: () => clearTimeout(handle),
+    dispose: () => {
+      clearTimeout(handle);
+      parent.removeEventListener("abort", onAbort);
+    },
   };
 }

@@ -173,18 +173,18 @@ describe("async onEvent", () => {
     const onUnhandled = (reason: unknown) => unhandled.push(reason);
     process.on("unhandledRejection", onUnhandled);
     try {
-      // A: the sink rejects 40 ms after a tool_call, while the run was aborted at 10 ms.
+      // A: the sink rejects 150 ms after a tool_call, while the run was aborted at 60 ms.
       const hangs = CodeNode<State>((_s, ctx) => {
         ctx.trace.append({ type: "tool_call" });
         return new Promise<State>(() => {});
       });
       const late = (e: TraceEvent) =>
         e.type === "tool_call"
-          ? new Promise<void>((_resolve, reject) => setTimeout(() => reject(new Error("late")), 40))
+          ? new Promise<void>((_resolve, reject) => setTimeout(() => reject(new Error("late")), 150))
           : Promise.resolve();
       const first = new AbortController();
       const runA = single(hangs).run({ n: 0 }, { onEvent: late, signal: first.signal });
-      setTimeout(() => first.abort(), 10);
+      setTimeout(() => first.abort(), 60);
       expect((await failure(runA)).code).toBe("ABORTED");
 
       // B: the sink listens to the run's signal and rejects the exit write when the run is aborted.
@@ -197,10 +197,10 @@ describe("async onEvent", () => {
             })
           : Promise.resolve();
       const runB = single(CodeNode<State>((s) => s)).run({ n: 0 }, { onEvent: listening, signal });
-      setTimeout(() => second.abort(), 10);
+      setTimeout(() => second.abort(), 60);
       expect((await failure(runB)).code).toBe("ABORTED");
 
-      await sleep(80);
+      await sleep(250);
       expect(unhandled).toEqual([]);
     } finally {
       process.off("unhandledRejection", onUnhandled);
@@ -238,11 +238,24 @@ describe("async onEvent", () => {
     const controller = new AbortController();
     const started = Date.now();
     const pending = single(node).run({ n: 0 }, { onEvent, signal: controller.signal });
-    setTimeout(() => controller.abort(), 20);
+    setTimeout(() => controller.abort(), 60);
     const error = await failure(pending);
     expect(error.code).toBe("ABORTED");
     expect(Date.now() - started).toBeLessThan(500);
     expect(error.trace?.find((e) => e.type === "error")?.meta).toMatchObject({ code: "NODE_FAILED" });
+  });
+
+  it("does not mark a write node that already returned as outcome unknown", async () => {
+    const controller = new AbortController();
+    const place = CodeNode<State>((s) => s, { effect: "write" });
+    const onEvent = (e: TraceEvent) => {
+      if (e.type !== "exit") return undefined;
+      controller.abort();
+      return sleep(5);
+    };
+    const error = await failure(single(place).run({ n: 0 }, { onEvent, signal: controller.signal }));
+    expect(error.code).toBe("ABORTED");
+    expect(error.trace?.some((e) => e.meta?.outcome !== undefined)).toBe(false);
   });
 
   it("stores events in order when a node is retried", async () => {

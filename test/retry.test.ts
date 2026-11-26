@@ -207,7 +207,8 @@ describe("retries in a run", () => {
     );
     const error = syncFailure(() => single(node).runSync({ n: 0 }));
     expect(error.code).toBe("ASYNC_IN_SYNC_RUN");
-    expect(error.message).toBe("runSync() cannot wait 30ms before retrying here; use run()");
+    expect(error.message).toBe('Node "a" (step 0): runSync() cannot wait 30ms before retrying here; use run()');
+    expect(error.nodeId).toBe("a");
   });
 
   it("gives up at once on a 4xx and on invalid state", async () => {
@@ -386,18 +387,24 @@ describe("write nodes and retries", () => {
 
   it("never retries a write node that skipped the checks", async () => {
     let calls = 0;
-    const graph = single(CodeNode<State>((s) => s, { effect: "write" }));
-    const { trace } = await graph.run({ n: 0 });
-    const override = Object.assign(
-      (_s: State): State => {
-        calls++;
-        throw new Error("flaky");
-      },
-      { effect: "write" as const, retry: { maxAttempts: 3, backoff: false as const } },
-    );
-    const error = await failure(graph.replay(trace, { mode: "live", allowWrites: true, overrides: { a: override } }));
+    const place = (_s: State): State => {
+      calls++;
+      throw new Error("flaky");
+    };
+    const graph = single(place);
+    Object.assign(place, { retry: { maxAttempts: 3, backoff: false }, effect: "write" });
+    const error = await failure(graph.run({ n: 0 }));
     expect(calls).toBe(1);
     expect(error.trace?.find((e) => e.type === "error")?.meta?.willRetry).toBe(false);
+  });
+
+  it("checks replay overrides", async () => {
+    const graph = single(CodeNode<State>((s) => s));
+    const { trace } = await graph.run({ n: 0 });
+    const override = Object.assign((s: State) => s, { timeoutMs: 0 });
+    const error = await failure(graph.replay(trace, { mode: "live", overrides: { a: override } }));
+    expect(error.code).toBe("INVALID_GRAPH");
+    expect(error.message).toBe('Override for node "a": timeoutMs must be an integer from 1 to 2147483647, got 0');
   });
 });
 

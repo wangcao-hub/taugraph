@@ -124,6 +124,7 @@ interface Deadline {
   dispose(): void;
 }
 
+/** Composed by hand: `AbortSignal.any` keeps every combination alive on a long-lived source signal. */
 function startDeadline(run: AbortSignal, ms: number, error: TaugraphError): Deadline {
   const timer = new AbortController();
   let expire: ((reason: unknown) => void) | undefined;
@@ -131,8 +132,14 @@ function startDeadline(run: AbortSignal, ms: number, error: TaugraphError): Dead
     timer.abort(error);
     expire?.(error);
   }, ms);
+  const onAbort = () => {
+    clearTimeout(handle);
+    timer.abort(run.reason);
+  };
+  if (run.aborted) onAbort();
+  else run.addEventListener("abort", onAbort, { once: true });
   return {
-    signal: AbortSignal.any([run, timer.signal]),
+    signal: timer.signal,
     race<T>(promise: PromiseLike<T>): Promise<T> {
       return new Promise<T>((resolve, reject) => {
         expire = reject;
@@ -140,7 +147,10 @@ function startDeadline(run: AbortSignal, ms: number, error: TaugraphError): Dead
         Promise.resolve(promise).then(resolve, reject);
       });
     },
-    dispose: () => clearTimeout(handle),
+    dispose: () => {
+      clearTimeout(handle);
+      run.removeEventListener("abort", onAbort);
+    },
   };
 }
 
@@ -375,12 +385,14 @@ function* runStep<S>(p: StepParams<S>): Effects<StepOutcome<S>> {
             }),
           );
     const control = createContext({ ...p, attempt, values, signal: deadline?.signal ?? p.signal });
+    let settled = false;
     try {
       let output: unknown;
       let failure: { readonly error: unknown } | undefined;
       try {
         const result = node(state, control.ctx);
         output = yield deadline && isThenable(result) ? deadline.race(result) : result;
+        settled = true;
       } catch (error) {
         failure = { error };
       } finally {
@@ -424,8 +436,8 @@ function* runStep<S>(p: StepParams<S>): Effects<StepOutcome<S>> {
         policyFailure = { cause }; // retryOn threw: record this attempt as usual, then fail without retrying
       }
       const delayMs = willRetry && node.retry ? retryDelay(node.retry, attempt, thrown) : 0;
-      // A write that timed out or was cut off may have happened anyway.
-      const unknown = node.effect === "write" && (error.code === "TIMEOUT" || error.code === "ABORTED");
+      // A write that timed out or was cut off before it settled may have happened anyway.
+      const unknown = node.effect === "write" && !settled && (error.code === "TIMEOUT" || error.code === "ABORTED");
       try {
         yield* record(log, {
           type: "error",
@@ -453,7 +465,17 @@ function* runStep<S>(p: StepParams<S>): Effects<StepOutcome<S>> {
         throw new TaugraphError("NODE_FAILED", message, { nodeId, step, cause });
       }
       if (!willRetry) throw error;
-      if (delayMs > 0) yield new Wait(delayMs);
+      if (delayMs > 0) {
+        try {
+          yield new Wait(delayMs);
+        } catch (failure) {
+          // runSync cannot block here: name the node, like any other step failure.
+          if (failure instanceof TaugraphError && failure.code === "ASYNC_IN_SYNC_RUN") {
+            throw asNodeError(failure, nodeId, step);
+          }
+          throw failure;
+        }
+      }
     }
   }
 }

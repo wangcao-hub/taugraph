@@ -140,6 +140,41 @@ describe("timeoutMs", () => {
     }
   });
 
+  it("a node that settles in time keeps its result and its signal", async () => {
+    let signal: AbortSignal | undefined;
+    const node = CodeNode<State>(
+      async (_s, ctx) => {
+        signal = ctx.signal;
+        await sleep(5);
+        return { n: 1 };
+      },
+      { timeoutMs: 1000 },
+    );
+    const { state, trace } = await single(node).run({ n: 0 });
+    expect(state.n).toBe(1);
+    expect(trace.some((e) => e.type === "error")).toBe(false);
+    await sleep(20);
+    expect(signal?.aborted).toBe(false);
+  });
+
+  it("an abort during a timeoutMs node reports ABORTED and aborts its signal with the run's reason", async () => {
+    let signal: AbortSignal | undefined;
+    const node = CodeNode<State>(
+      (_s, ctx) => {
+        signal = ctx.signal;
+        return hang();
+      },
+      { timeoutMs: 1000 },
+    );
+    const controller = new AbortController();
+    const pending = single(node).run({ n: 0 }, { signal: controller.signal });
+    setTimeout(() => controller.abort(new Error("stop")), 10);
+    const error = await failure(pending);
+    expect(error.code).toBe("ABORTED");
+    expect(signal?.aborted).toBe(true);
+    expect((signal?.reason as Error | undefined)?.message).toBe("stop");
+  });
+
   it("limits each LLMNode call and aborts the request", async () => {
     let signal: AbortSignal | undefined;
     const model: LLMModel = {

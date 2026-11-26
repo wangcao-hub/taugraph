@@ -477,6 +477,30 @@ describe("timeouts", () => {
     expect(model.requests).toHaveLength(1);
   });
 
+  it("stops a timed tool at once when the run is aborted", async () => {
+    let signal: AbortSignal | undefined;
+    const stuck = tool({
+      name: "stuck",
+      timeoutMs: 60_000,
+      run: (_args, ctx) => {
+        signal = ctx.signal;
+        return hang();
+      },
+    });
+    const model = scripted([{ content: "", toolCalls: [call("c1", "stuck")] }]);
+    const controller = new AbortController();
+    const started = Date.now();
+    const pending = createAgent({ model, tools: [stuck] }).run(ask("go"), { signal: controller.signal });
+    setTimeout(() => controller.abort(), 10);
+    const error = await pending.then(
+      () => undefined,
+      (e: unknown) => e,
+    );
+    expect(isTaugraphError(error) && error.code).toBe("ABORTED");
+    expect(Date.now() - started).toBeLessThan(500);
+    expect(signal?.aborted).toBe(true);
+  });
+
   it("limits each model call", async () => {
     const model: LLMModel = { id: "mock:slow", complete: () => hang() };
     const error = await createAgent({ model, timeoutMs: 20 })

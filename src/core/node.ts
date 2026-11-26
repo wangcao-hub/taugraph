@@ -51,7 +51,7 @@ export function nodeMetaProblem(meta: NodeMeta): string | undefined {
 }
 
 /**
- * Wraps a node function with metadata (kind, retry policy, effect). This is the only hook
+ * Wraps a node function with metadata (kind, retry policy, effect, timeout). This is the only hook
  * plugin node packages need: `CodeNode`, `LLMNode` and friends are built on it.
  */
 export function defineNode<S>(fn: NodeFn<S>, meta: NodeMeta = {}): Node<S> {
