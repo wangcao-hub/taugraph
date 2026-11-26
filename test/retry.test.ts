@@ -260,6 +260,57 @@ describe("retries in a run", () => {
     expect(error.trace?.filter((e) => e.type === "error").map((e) => e.meta?.willRetry)).toEqual([true, false]);
   });
 
+  it("fails the step without retrying when retryOn throws, after recording the attempt", async () => {
+    const policyError = new TypeError("bad policy");
+    let calls = 0;
+    const node = CodeNode<State>(
+      () => {
+        calls++;
+        throw new Error("original");
+      },
+      {
+        retry: {
+          maxAttempts: 3,
+          backoff: false,
+          retryOn: () => {
+            throw policyError;
+          },
+        },
+      },
+    );
+    const error = await failure(single(node).run({ n: 0 }));
+    expect(error.code).toBe("NODE_FAILED");
+    expect(error.nodeId).toBe("a");
+    expect(error.message).toBe('Node "a" (step 0): retry.retryOn threw: bad policy');
+    expect(error.cause).toBe(policyError);
+    expect(calls).toBe(1);
+    const errors = error.trace?.filter((e) => e.type === "error") ?? [];
+    expect(errors).toHaveLength(1);
+    expect(errors[0]?.meta).toMatchObject({
+      code: "NODE_FAILED",
+      willRetry: false,
+      message: expect.stringContaining("original"),
+    });
+    expect(errors[0]?.meta).not.toHaveProperty("delayMs");
+  });
+
+  it.each(["ABORTED", "ASYNC_IN_SYNC_RUN", "SINK_FAILED"] as const)(
+    "never retries %s, even when retryOn says yes",
+    async (code) => {
+      let calls = 0;
+      const node = CodeNode<State>(
+        () => {
+          calls++;
+          throw new TaugraphError(code, "x");
+        },
+        { retry: { maxAttempts: 3, backoff: false, retryOn: () => true } },
+      );
+      const error = await failure(single(node).run({ n: 0 }));
+      expect(error.code).toBe(code);
+      expect(calls).toBe(1);
+    },
+  );
+
   it("does not wait when a replay reuses a recorded step", async () => {
     let calls = 0;
     const node = CodeNode<State>(
@@ -268,13 +319,13 @@ describe("retries in a run", () => {
         if (calls === 1) throw new Error("flaky");
         return { n: s.n + 1 };
       },
-      { retry: { maxAttempts: 2, backoff: { initialMs: 50, jitter: 0 } } },
+      { retry: { maxAttempts: 2, backoff: { initialMs: 200, jitter: 0 } } },
     );
     const graph = single(node);
     const { trace } = await graph.run({ n: 0 });
     const started = Date.now();
     const replay = await graph.replay(trace);
-    expect(Date.now() - started).toBeLessThan(40);
+    expect(Date.now() - started).toBeLessThan(150);
     expect(calls).toBe(2);
     expect(replay.trace.some((e) => e.type === "error")).toBe(false);
   });
@@ -367,6 +418,13 @@ describe("retry policy checks", () => {
     );
     expect(define({ maxAttempts: 2, retryOn: "yes" as never })).toThrow(
       "defineNode: retry.retryOn must be a function, got string",
+    );
+    expect(define(3 as never)).toThrow("defineNode: retry must be an object, got 3");
+    expect(define({ maxAttempts: 2, backoff: true as never })).toThrow(
+      "defineNode: retry.backoff must be false or an object, got true",
+    );
+    expect(define({ maxAttempts: 2, idempotent: "yes" as never })).toThrow(
+      "defineNode: retry.idempotent must be a boolean, got yes",
     );
   });
 

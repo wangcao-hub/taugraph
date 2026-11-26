@@ -328,7 +328,13 @@ function* runStep<S>(p: StepParams<S>): Effects<StepOutcome<S>> {
       return { kind: "exit", state: next };
     } catch (thrown) {
       const error = asNodeError(thrown, nodeId, step);
-      const willRetry = attempt < maxAttempts && shouldRetry(node, error, thrown);
+      let willRetry = false;
+      let policyFailure: { readonly cause: unknown } | undefined;
+      try {
+        willRetry = attempt < maxAttempts && shouldRetry(node, error, thrown);
+      } catch (cause) {
+        policyFailure = { cause }; // retryOn threw: record this attempt as usual, then fail without retrying
+      }
       const delayMs = willRetry && node.retry ? retryDelay(node.retry, attempt, thrown) : 0;
       log.append({
         type: "error",
@@ -336,6 +342,11 @@ function* runStep<S>(p: StepParams<S>): Effects<StepOutcome<S>> {
         step,
         meta: { attempt, source, code: error.code, message: error.message, willRetry, ...(willRetry && { delayMs }) },
       });
+      if (policyFailure) {
+        const { cause } = policyFailure;
+        const message = `Node "${nodeId}" (step ${step}): retry.retryOn threw: ${errorMessage(cause)}`;
+        throw new TaugraphError("NODE_FAILED", message, { nodeId, step, cause });
+      }
       if (!willRetry) throw error;
       if (delayMs > 0) yield new Wait(delayMs);
     }
