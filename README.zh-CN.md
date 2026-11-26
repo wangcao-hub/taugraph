@@ -248,7 +248,7 @@ CodeNode(fetchPrices, { retry: { maxAttempts: 4 }, timeoutMs: 10_000 });
 ```
 
 - **哪些错误会重试。** 默认由 `isRetryable(error)` 判断。重试也修不好的内核错误（`INVALID_STATE`、`ABORTED`、`SINK_FAILED` 等）不重试；HTTP 4xx 也不重试，但 408、409、425、429 除外，状态码取自错误本身或它的 `cause` 链上的数字 `status`。其他错误都重试，包括它不认识的错误。想自己判断就传 `retryOn(error)`，它收到的是节点抛出的原始错误。
-- **等多久。** 指数退避：先等 500 毫秒，之后每次翻倍，最多 30 秒，再随机减去最多一半（`backoff: { initialMs, factor, maxMs, jitter }`，设为 `false` 则立即重试）。错误上带 `retryAfterMs` 时至少等这么久，`taugraph/openai` 会从 `Retry-After` 读出它。`run` 用定时器等待，运行被中止时立即停止；`runSync` 会阻塞线程，在不允许阻塞的地方（浏览器主线程）报 `ASYNC_IN_SYNC_RUN`。每次失败都记为一条 `error` 事件，带 `willRetry`；要重试时还带 `delayMs`。
+- **等多久。** 指数退避：先等 500 毫秒，之后每次翻倍，最多 30 秒，再随机减去最多一半（`backoff: { initialMs, factor, maxMs, jitter }`，设为 `false` 则立即重试）。错误上带 `retryAfterMs` 时至少等这么久，`taugraph/openai` 会从 `Retry-After` 读出它。它不受 `maxMs` 限制；如果服务端可能要求很长的等待，用 `retryOn` 自己判断，或者中止运行（`runSync` 会在整个等待期间阻塞线程）。`run` 用定时器等待，运行被中止时立即停止；`runSync` 会阻塞线程，在不允许阻塞的地方（浏览器主线程）报 `ASYNC_IN_SYNC_RUN`。每次失败都记为一条 `error` 事件，带 `willRetry`；要重试时还带 `delayMs`。
 - **写操作节点。** `write` 节点配了 `retry` 就必须写 `idempotent: true`，否则 `defineNode` 报错：重复下单就是第二笔订单。`ctx.meta.idempotencyKey`（`<runId>:<step>`）在同一步的每次尝试里都相同，崩溃后恢复时也相同；把它传给外部接口（比如作为 `Idempotency-Key` 请求头），重复执行就是安全的。
 - **超时。** 节点上的 `timeoutMs` 让 Promise 没有按时完成的这次尝试以 `TIMEOUT` 失败，并中止 `ctx.signal`。`TIMEOUT` 和其他错误一样会重试。同步代码无法被打断。`write` 节点因超时或中止停下时，它的 `error` 事件带 `outcome: "unknown"`：副作用可能发生了，也可能没有。
 
