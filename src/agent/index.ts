@@ -84,11 +84,11 @@ export interface AgentConfig {
   /** Model calls allowed in one run. Default 8. */
   readonly maxRounds?: number;
   /**
-   * `"answer"`: the last model call that `maxRounds` allows is sent with `toolChoice: "none"` (the tools stay in the
-   * request) and ends with `lastRoundNote`, so the model has to answer in words; tool calls it returns anyway are
-   * ignored (they stay in that call's `llm_call` event). The run then stops with `"done"`, `final` may be empty, and
-   * `rounds === maxRounds` tells that the limit was reached. Default `"tools"`: every call gets the tools and the
-   * configured `toolChoice`.
+   * `"answer"`: the last model call that `maxRounds` allows asks the model to answer in words: the tools stay in the
+   * request with `toolChoice: "none"`, and the request ends with `lastRoundNote`. Not every service honours `"none"`,
+   * so tool calls returned anyway are ignored (they stay in that call's `llm_call` event). The run then stops with
+   * `"done"`, `final` may be empty, and `rounds === maxRounds` tells that the limit was reached. Default `"tools"`:
+   * every call gets the tools and the configured `toolChoice`.
    */
   readonly lastRound?: "tools" | "answer";
   /**
@@ -239,15 +239,18 @@ export function createAgent(config: AgentConfig): AgentGraph {
     prompt: (s) => ({
       // The answer-only request ends with a note that the tool calls are used up: with toolChoice "none" alone, some
       // models (DeepSeek) still write tool-call markup into the answer. It is a user message because some providers
-      // take system messages only at the start, and it is not added to the state.
+      // take system messages only at the start, and it is not added to the state. Without tools there is nothing to
+      // stop, and right after a user message it would be a second user turn, which some services refuse.
       messages: [
         ...(config.system ? [{ role: "system" as const, content: config.system }] : []),
         ...s.messages,
-        ...(answerOnly(s) ? [{ role: "user" as const, content: note }] : []),
+        ...(answerOnly(s) && specs.length > 0 && s.messages.at(-1)?.role !== "user"
+          ? [{ role: "user" as const, content: note }]
+          : []),
       ],
+      // The answer-only round keeps the tools: some services (Anthropic) refuse a history of tool calls without tools,
+      // and the prompt prefix (and its cache) stays the same. "none" asks the model not to call one.
       ...(specs.length > 0 && { tools: specs }),
-      // The answer-only round keeps the tools, so the model still sees what its earlier calls were, and says "none":
-      // without tools in the request, some models (DeepSeek) write their tool-call markup into the answer instead.
       ...(answerOnly(s)
         ? specs.length > 0 && { toolChoice: "none" as const }
         : config.toolChoice && { toolChoice: config.toolChoice }),

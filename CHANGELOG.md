@@ -6,11 +6,11 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Added
 
-- `createAgent({ lastRoundNote })`: the words of that last user message, e.g. in your prompts' language. Default `AGENT_DEFAULTS.lastRoundNote`.
+- `createAgent({ lastRoundNote })`: the words of the user message that ends the `lastRound: "answer"` request, e.g. in your prompts' language. Default `AGENT_DEFAULTS.lastRoundNote`.
 
 ### Fixed
 
-- `lastRound: "answer"` keeps the tools in the last request, sends `toolChoice: "none"`, and ends the request with a user message saying the tool calls are used up (`lastRoundNote`), instead of leaving the tools out. Given a history of tool calls and no tools, DeepSeek wrote its tool-call markup into the answer; Anthropic and Bedrock refuse such a request. An adapter used with `lastRound: "answer"` now has to support `toolChoice: "none"` (`taugraph/openai` does).
+- `lastRound: "answer"` keeps the tools in the last request with `toolChoice: "none"`, and ends that request with a user message saying the tool calls are used up (`lastRoundNote`), instead of leaving the tools out. Given a history of tool calls and no tools, DeepSeek wrote its tool-call markup into the answer, and `"none"` alone did not stop it; Anthropic refuses a history with tool calls when the request has no tools. Services that ignore `"none"` still get the note, and tool calls they return are ignored.
 
 ## [0.4.1] - 2026-11-26
 

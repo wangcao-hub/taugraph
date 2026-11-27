@@ -561,7 +561,9 @@ describe("lastRound", () => {
     expect(path).toEqual(["think", "act", "think", "finish"]);
     expect(state).toMatchObject({ final: "南京晴", stop: "done", rounds: 2, pending: [] });
     expect(state.messages.at(-1)).toEqual({ role: "assistant", content: "南京晴", model: "mock:agent" });
-    expect(trace.filter((e) => e.type === "llm_call")).toHaveLength(2);
+    const llmCalls = trace.filter((e) => e.type === "llm_call");
+    expect(llmCalls).toHaveLength(2);
+    expect((llmCalls.at(-1)?.input as LLMRequest | undefined)?.messages.at(-1)).toEqual(note);
     expect(trace.filter((e) => e.type === "tool_call")).toHaveLength(1);
   });
 
@@ -573,14 +575,16 @@ describe("lastRound", () => {
       toolChoice: "none",
       tools: [expect.objectContaining({ name: "weather" })],
     });
+    expect(model.requests[0]?.messages.at(-1)).toEqual({ role: "user", content: "hi" });
     expect(state).toMatchObject({ final: "好", stop: "done" });
   });
 
   it("uses the lastRoundNote it is given", async () => {
-    const model = scripted([{ content: "好" }]);
-    const agent = createAgent({ model, maxRounds: 1, lastRound: "answer", lastRoundNote: "工具用完了，直接回答。" });
+    const model = scripted([{ content: "", toolCalls: [call("c1", "weather", { city: "南京" })] }, { content: "好" }]);
+    const lastRoundNote = "工具用完了，直接回答。";
+    const agent = createAgent({ model, tools: [weather], maxRounds: 2, lastRound: "answer", lastRoundNote });
     await agent.run(ask("hi"));
-    expect(model.requests[0]?.messages.at(-1)).toEqual({ role: "user", content: "工具用完了，直接回答。" });
+    expect(model.requests[1]?.messages.at(-1)).toEqual({ role: "user", content: lastRoundNote });
   });
 
   it("refuses an empty lastRoundNote", () => {
@@ -594,6 +598,7 @@ describe("lastRound", () => {
     const { state } = await createAgent({ model, maxRounds: 1, lastRound: "answer" }).run(ask("hi"));
     expect(model.requests[0]).not.toHaveProperty("tools");
     expect(model.requests[0]).not.toHaveProperty("toolChoice");
+    expect(model.requests[0]?.messages.at(-1)).toEqual({ role: "user", content: "hi" });
     expect(state).toMatchObject({ final: "好", stop: "done" });
   });
 
@@ -639,6 +644,7 @@ describe("lastRound", () => {
     expect(model.requests[0]?.tools).toHaveLength(1);
     expect(model.requests[1]?.tools).toHaveLength(1);
     expect(model.requests[1]?.toolChoice).toBe("none");
+    expect(model.requests[1]?.messages.at(-1)).toEqual({ role: "user", content: AGENT_DEFAULTS.lastRoundNote });
     expect(resumed.status).toBe("completed");
     expect(resumed.state).toMatchObject({ final: "南京晴", stop: "done", rounds: 2 });
   });
