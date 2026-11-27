@@ -10,7 +10,7 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ### Fixed
 
-- `lastRound: "answer"` keeps the tools in the last request with `toolChoice: "none"`, and ends that request with a user message saying the tool calls are used up (`lastRoundNote`), instead of leaving the tools out. Given a history of tool calls and no tools, DeepSeek wrote its tool-call markup into the answer, and `"none"` alone did not stop it; Anthropic refuses a history with tool calls when the request has no tools. Services that ignore `"none"` still get the note, and tool calls they return are ignored.
+- `lastRound: "answer"` keeps the tools in the last request with `toolChoice: "none"`, and, after tool results, ends that request with a user message saying the tool calls are used up (`lastRoundNote`), instead of leaving the tools out. Given a history of tool calls and no tools, DeepSeek wrote its tool-call markup into the answer, and `"none"` alone did not stop it; Anthropic refuses a history with tool calls when the request has no tools. Services that ignore `"none"` still get the note, and tool calls they return are ignored.
 
 ## [0.4.1] - 2026-11-26
 

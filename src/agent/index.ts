@@ -85,10 +85,10 @@ export interface AgentConfig {
   readonly maxRounds?: number;
   /**
    * `"answer"`: the last model call that `maxRounds` allows asks the model to answer in words: the tools stay in the
-   * request with `toolChoice: "none"`, and the request ends with `lastRoundNote`. Not every service honours `"none"`,
-   * so tool calls returned anyway are ignored (they stay in that call's `llm_call` event). The run then stops with
-   * `"done"`, `final` may be empty, and `rounds === maxRounds` tells that the limit was reached. Default `"tools"`:
-   * every call gets the tools and the configured `toolChoice`.
+   * request with `toolChoice: "none"`, and after tool results the request ends with `lastRoundNote`. Not every
+   * service honours `"none"`, so tool calls returned anyway are ignored (they stay in that call's `llm_call` event).
+   * The run then stops with `"done"`, `final` may be empty, and `rounds === maxRounds` tells that the limit was
+   * reached. Default `"tools"`: every call gets the tools and the configured `toolChoice`.
    */
   readonly lastRound?: "tools" | "answer";
   /**

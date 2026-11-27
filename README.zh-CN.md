@@ -329,7 +329,7 @@ think ──没有调用，或到了 maxRounds──▶ finish
 - 工具定义沿用 MCP 的字段（`name`、`description`，`inputSchema` 是 JSON Schema）。给了 `inputSchema` 就用它，否则通过 [Standard JSON Schema](https://standardschema.dev/json-schema) 从 `input` 生成（Zod 4、Valibot、ArkType）。
 - 参数不合 schema、工具不存在、参数读不懂、工具抛错，都作为错误结果交回模型，循环继续。
 - `maxRounds`（默认 8）限制模型调用次数；一次回复最多执行 32 个调用。每次工具执行是一条 `tool_call` 事件。
-- `lastRound: "answer"`：`maxRounds` 允许的最后一次模型调用要求模型用文字作答：工具仍留在请求里，同时发 `toolChoice: "none"`，请求末尾再加一条用户消息，告诉模型工具次数已经用完（`lastRoundNote`，按你的提示词的语言写，默认是 `AGENT_DEFAULTS.lastRoundNote`）。这条提示只在这次请求和它的 `llm_call` 事件里，不进 `state.messages`。并不是每个服务都遵守 `"none"`（Ollama 会忽略），所以模型仍返回的工具调用会被忽略。这时运行以 `stop: "done"` 结束，`final` 可能为空；`rounds === maxRounds` 说明用满了轮数。默认 `"tools"`。
+- `lastRound: "answer"`：`maxRounds` 允许的最后一次模型调用要求模型用文字作答：工具仍留在请求里，同时发 `toolChoice: "none"`，前面有工具结果时，请求末尾再加一条用户消息，告诉模型工具次数已经用完（`lastRoundNote`，按你的提示词的语言写，默认是 `AGENT_DEFAULTS.lastRoundNote`）。这条提示只在这次请求和它的 `llm_call` 事件里，不进 `state.messages`。并不是每个服务都遵守 `"none"`（Ollama 会忽略），所以模型仍返回的工具调用会被忽略。这时运行以 `stop: "done"` 结束，`final` 可能为空；`rounds === maxRounds` 说明用满了轮数。默认 `"tools"`。
 - `createAgent` 的 `timeoutMs` 限制每次模型调用（超时报 `TIMEOUT`，`retry` 会重试）。工具的 `timeoutMs` 限制它的每次执行：只读工具超时时，错误结果交回模型，循环继续；写操作工具超时时，运行以 `TIMEOUT` 失败，因为副作用是否发生无从知道。
 - 模型接口新增可选的 `tools`、`toolChoice`、`toolCalls`，以及 `tool` 消息（自己转换 `role` 的适配器要补一个 `tool` 分支）；[OpenAI 兼容适配器](#openai-兼容模型taugraphopenai) 负责转换。`pnpm example:agent` 能把整套跑一遍。工具结果可以带图片（见[图片](#图片)）。
 
