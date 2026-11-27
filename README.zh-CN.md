@@ -329,6 +329,7 @@ think ──没有调用，或到了 maxRounds──▶ finish
 - 工具定义沿用 MCP 的字段（`name`、`description`，`inputSchema` 是 JSON Schema）。给了 `inputSchema` 就用它，否则通过 [Standard JSON Schema](https://standardschema.dev/json-schema) 从 `input` 生成（Zod 4、Valibot、ArkType）。
 - 参数不合 schema、工具不存在、参数读不懂、工具抛错，都作为错误结果交回模型，循环继续。
 - `maxRounds`（默认 8）限制模型调用次数；一次回复最多执行 32 个调用。每次工具执行是一条 `tool_call` 事件。
+- `lastRound: "answer"`：`maxRounds` 允许的最后一次模型调用不带工具，模型只能用文字回答；它仍返回的工具调用会被忽略。默认 `"tools"`。
 - `createAgent` 的 `timeoutMs` 限制每次模型调用（超时报 `TIMEOUT`，`retry` 会重试）。工具的 `timeoutMs` 限制它的每次执行：只读工具超时时，错误结果交回模型，循环继续；写操作工具超时时，运行以 `TIMEOUT` 失败，因为副作用是否发生无从知道。
 - 模型接口新增可选的 `tools`、`toolChoice`、`toolCalls`，以及 `tool` 消息（自己转换 `role` 的适配器要补一个 `tool` 分支）；[OpenAI 兼容适配器](#openai-兼容模型taugraphopenai) 负责转换。`pnpm example:agent` 能把整套跑一遍。工具结果可以带图片（见[图片](#图片)）。
 
@@ -448,6 +449,7 @@ for (const run of store.list()) {
 
 - 一个图用一个目录：上面的恢复循环会用同一个图恢复目录里所有中断的 run。
 - `list()` 给出五种状态：`running`（有活着的进程持有这个 run 的锁）、`interrupted`（没有结束，也没有进程在写）、`paused`、`completed`、`failed`。它会跳过无法当作 trace 读取的文件；对这些文件，`load` 会抛出 `INVALID_TRACE`。
+- `remove(runId)` 删除一个 run 的文件，返回原来有没有这个文件。别的活着的进程或这个存储自己正在写的 run，它拒绝删除。
 - 崩溃可能留下写了一半的最后一行。`load` 会忽略它，接着跑之前存储会把它截掉。对当时正在执行的写操作步骤，`resume` 会抛出 `UNKNOWN_OUTCOME`，不会再跑一遍。
 - `durability` 决定什么时候 `fsync`：`"writes"`（默认）在写操作步骤开始前、暂停时和结束时；`"every"` 每个事件之后；`"none"` 从不。用 `"writes"` 时，断电可能丢掉只读步骤，重跑它们是安全的，但不会让写操作步骤跑两遍。一个新 run 如果还没走到写操作步骤、暂停或结束，断电可能让它整个丢失。
 - 写入期间每个 run 有一个锁文件，两个进程不能同时追加同一个 run。已经退出的进程留下的锁会被接管。
