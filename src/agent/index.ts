@@ -85,11 +85,18 @@ export interface AgentConfig {
   readonly maxRounds?: number;
   /**
    * `"answer"`: the last model call that `maxRounds` allows is sent with `toolChoice: "none"` (the tools stay in the
-   * request), so the model has to answer in words; tool calls it returns anyway are ignored (they stay in that call's
-   * `llm_call` event). The run then stops with `"done"`, `final` may be empty, and `rounds === maxRounds` tells that the
-   * limit was reached. Default `"tools"`: every call gets the tools and the configured `toolChoice`.
+   * request) and ends with `lastRoundNote`, so the model has to answer in words; tool calls it returns anyway are
+   * ignored (they stay in that call's `llm_call` event). The run then stops with `"done"`, `final` may be empty, and
+   * `rounds === maxRounds` tells that the limit was reached. Default `"tools"`: every call gets the tools and the
+   * configured `toolChoice`.
    */
   readonly lastRound?: "tools" | "answer";
+  /**
+   * With `lastRound: "answer"`, the words sent as a user message at the end of that last request, telling the model
+   * its tool calls are used up. Default `AGENT_DEFAULTS.lastRoundNote`. Write it in the language of your prompts. It is
+   * part of that request only, not of the conversation in the state.
+   */
+  readonly lastRoundNote?: string;
   readonly toolChoice?: ToolChoice;
   readonly temperature?: number;
   readonly maxTokens?: number;
@@ -109,7 +116,13 @@ export interface AgentConfig {
 export type AgentNodeId = "think" | "act" | "act_write" | "finish";
 export type AgentGraph = Graph<AgentState, AgentInput, AgentNodeId>;
 
-export const AGENT_DEFAULTS = Object.freeze({ maxRounds: 8, maxCallsPerReply: 32, maxSteps: 1000 });
+export const AGENT_DEFAULTS = Object.freeze({
+  maxRounds: 8,
+  maxCallsPerReply: 32,
+  maxSteps: 1000,
+  lastRoundNote:
+    "You have used all your tool calls for this turn. Answer the user now, in words, from what you already have, and say what you could not find out. Do not call any tool.",
+});
 
 const TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 const DENIED = "The user did not allow this call";
@@ -203,6 +216,10 @@ export function createAgent(config: AgentConfig): AgentGraph {
   if (lastRound !== "tools" && lastRound !== "answer") {
     throw new TypeError(`createAgent: lastRound must be "tools" or "answer", got ${String(config.lastRound)}`);
   }
+  const note = config.lastRoundNote ?? AGENT_DEFAULTS.lastRoundNote;
+  if (typeof note !== "string" || note.trim() === "") {
+    throw new TypeError("createAgent: lastRoundNote must be a non-empty string");
+  }
   /** Whether the call made from this state is the last one allowed and must be answered in words. */
   const answerOnly = (s: AgentState) => lastRound === "answer" && s.rounds === maxRounds - 1;
   if (badTimeout(config.timeoutMs)) {
@@ -220,7 +237,14 @@ export function createAgent(config: AgentConfig): AgentGraph {
     model: config.model,
     ...(config.retry && { retry: config.retry }),
     prompt: (s) => ({
-      messages: [...(config.system ? [{ role: "system" as const, content: config.system }] : []), ...s.messages],
+      // The answer-only request ends with a note that the tool calls are used up: with toolChoice "none" alone, some
+      // models (DeepSeek) still write tool-call markup into the answer. It is a user message because some providers
+      // take system messages only at the start, and it is not added to the state.
+      messages: [
+        ...(config.system ? [{ role: "system" as const, content: config.system }] : []),
+        ...s.messages,
+        ...(answerOnly(s) ? [{ role: "user" as const, content: note }] : []),
+      ],
       ...(specs.length > 0 && { tools: specs }),
       // The answer-only round keeps the tools, so the model still sees what its earlier calls were, and says "none":
       // without tools in the request, some models (DeepSeek) write their tool-call markup into the answer instead.

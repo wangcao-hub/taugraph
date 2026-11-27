@@ -329,7 +329,7 @@ think ──没有调用，或到了 maxRounds──▶ finish
 - 工具定义沿用 MCP 的字段（`name`、`description`，`inputSchema` 是 JSON Schema）。给了 `inputSchema` 就用它，否则通过 [Standard JSON Schema](https://standardschema.dev/json-schema) 从 `input` 生成（Zod 4、Valibot、ArkType）。
 - 参数不合 schema、工具不存在、参数读不懂、工具抛错，都作为错误结果交回模型，循环继续。
 - `maxRounds`（默认 8）限制模型调用次数；一次回复最多执行 32 个调用。每次工具执行是一条 `tool_call` 事件。
-- `lastRound: "answer"`：`maxRounds` 允许的最后一次模型调用发 `toolChoice: "none"`（工具仍留在请求里），模型只能用文字回答；如果它仍返回工具调用，这些调用会被忽略（仍记在这次调用的 `llm_call` 事件里）。这时运行以 `stop: "done"` 结束，`final` 可能为空；`rounds === maxRounds` 说明用满了轮数。默认 `"tools"`。
+- `lastRound: "answer"`：`maxRounds` 允许的最后一次模型调用发 `toolChoice: "none"`（工具仍留在请求里），模型只能用文字回答；这次请求末尾还会加一条用户消息，告诉模型工具次数已经用完（`lastRoundNote`，按你的提示词的语言写，默认是 `AGENT_DEFAULTS.lastRoundNote`）；如果它仍返回工具调用，这些调用会被忽略（仍记在这次调用的 `llm_call` 事件里）。这时运行以 `stop: "done"` 结束，`final` 可能为空；`rounds === maxRounds` 说明用满了轮数。默认 `"tools"`。
 - `createAgent` 的 `timeoutMs` 限制每次模型调用（超时报 `TIMEOUT`，`retry` 会重试）。工具的 `timeoutMs` 限制它的每次执行：只读工具超时时，错误结果交回模型，循环继续；写操作工具超时时，运行以 `TIMEOUT` 失败，因为副作用是否发生无从知道。
 - 模型接口新增可选的 `tools`、`toolChoice`、`toolCalls`，以及 `tool` 消息（自己转换 `role` 的适配器要补一个 `tool` 分支）；[OpenAI 兼容适配器](#openai-兼容模型taugraphopenai) 负责转换。`pnpm example:agent` 能把整套跑一遍。工具结果可以带图片（见[图片](#图片)）。
 

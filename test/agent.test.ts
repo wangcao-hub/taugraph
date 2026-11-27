@@ -554,6 +554,10 @@ describe("lastRound", () => {
       toolChoice: "none",
       tools: [expect.objectContaining({ name: "weather" })],
     });
+    const note = { role: "user", content: AGENT_DEFAULTS.lastRoundNote };
+    expect(model.requests[1]?.messages.at(-1)).toEqual(note);
+    expect(model.requests[0]?.messages).not.toContainEqual(note);
+    expect(state.messages).not.toContainEqual(note);
     expect(path).toEqual(["think", "act", "think", "finish"]);
     expect(state).toMatchObject({ final: "南京晴", stop: "done", rounds: 2, pending: [] });
     expect(state.messages.at(-1)).toEqual({ role: "assistant", content: "南京晴", model: "mock:agent" });
@@ -570,6 +574,19 @@ describe("lastRound", () => {
       tools: [expect.objectContaining({ name: "weather" })],
     });
     expect(state).toMatchObject({ final: "好", stop: "done" });
+  });
+
+  it("uses the lastRoundNote it is given", async () => {
+    const model = scripted([{ content: "好" }]);
+    const agent = createAgent({ model, maxRounds: 1, lastRound: "answer", lastRoundNote: "工具用完了，直接回答。" });
+    await agent.run(ask("hi"));
+    expect(model.requests[0]?.messages.at(-1)).toEqual({ role: "user", content: "工具用完了，直接回答。" });
+  });
+
+  it("refuses an empty lastRoundNote", () => {
+    const make = () => createAgent({ model: scripted([]), lastRoundNote: "  " });
+    expect(make).toThrow(TypeError);
+    expect(make).toThrow("createAgent: lastRoundNote must be a non-empty string");
   });
 
   it("sends neither tools nor toolChoice on the last round when there are no tools", async () => {
@@ -594,6 +611,10 @@ describe("lastRound", () => {
     const unset = await runWith();
     const tools = await runWith("tools");
     expect(unset.requests[1]?.tools).toHaveLength(1);
+    expect(unset.requests.flatMap((r) => r.messages)).not.toContainEqual({
+      role: "user",
+      content: AGENT_DEFAULTS.lastRoundNote,
+    });
     expect(unset.state.stop).toBe("max_rounds");
     expect(tools.requests).toEqual(unset.requests);
     expect(tools.state).toEqual(unset.state);
