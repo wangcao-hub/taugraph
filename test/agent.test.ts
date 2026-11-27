@@ -539,7 +539,7 @@ describe("timeouts", () => {
 });
 
 describe("lastRound", () => {
-  it("sends no tools on the last round and takes its words as the answer", async () => {
+  it("keeps the tools on the last round with toolChoice none and takes its words as the answer", async () => {
     const model = scripted([
       { content: "", toolCalls: [call("c1", "weather", { city: "南京" })] },
       { content: "南京晴", toolCalls: [call("c2", "weather", { city: "上海" })] },
@@ -550,8 +550,10 @@ describe("lastRound", () => {
       toolChoice: "auto",
       tools: [expect.objectContaining({ name: "weather" })],
     });
-    expect(model.requests[1]).not.toHaveProperty("tools");
-    expect(model.requests[1]).not.toHaveProperty("toolChoice");
+    expect(model.requests[1]).toMatchObject({
+      toolChoice: "none",
+      tools: [expect.objectContaining({ name: "weather" })],
+    });
     expect(path).toEqual(["think", "act", "think", "finish"]);
     expect(state).toMatchObject({ final: "南京晴", stop: "done", rounds: 2, pending: [] });
     expect(state.messages.at(-1)).toEqual({ role: "assistant", content: "南京晴", model: "mock:agent" });
@@ -559,10 +561,20 @@ describe("lastRound", () => {
     expect(trace.filter((e) => e.type === "tool_call")).toHaveLength(1);
   });
 
-  it("asks without tools when maxRounds allows one call", async () => {
+  it("answers in words when maxRounds allows one call", async () => {
     const model = scripted([{ content: "好" }]);
     const agent = createAgent({ model, tools: [weather], toolChoice: "required", maxRounds: 1, lastRound: "answer" });
     const { state } = await agent.run(ask("hi"));
+    expect(model.requests[0]).toMatchObject({
+      toolChoice: "none",
+      tools: [expect.objectContaining({ name: "weather" })],
+    });
+    expect(state).toMatchObject({ final: "好", stop: "done" });
+  });
+
+  it("sends neither tools nor toolChoice on the last round when there are no tools", async () => {
+    const model = scripted([{ content: "好" }]);
+    const { state } = await createAgent({ model, maxRounds: 1, lastRound: "answer" }).run(ask("hi"));
     expect(model.requests[0]).not.toHaveProperty("tools");
     expect(model.requests[0]).not.toHaveProperty("toolChoice");
     expect(state).toMatchObject({ final: "好", stop: "done" });
@@ -604,7 +616,8 @@ describe("lastRound", () => {
     const resumed = await agent.resume(paused.trace, true);
     expect(model.requests).toHaveLength(2);
     expect(model.requests[0]?.tools).toHaveLength(1);
-    expect(model.requests[1]).not.toHaveProperty("tools");
+    expect(model.requests[1]?.tools).toHaveLength(1);
+    expect(model.requests[1]?.toolChoice).toBe("none");
     expect(resumed.status).toBe("completed");
     expect(resumed.state).toMatchObject({ final: "南京晴", stop: "done", rounds: 2 });
   });

@@ -84,10 +84,10 @@ export interface AgentConfig {
   /** Model calls allowed in one run. Default 8. */
   readonly maxRounds?: number;
   /**
-   * `"answer"`: the last model call that `maxRounds` allows goes without `tools` and `toolChoice`, so the model has to
-   * answer in words; tool calls it returns anyway are ignored (they stay in that call's `llm_call` event). The run then
-   * stops with `"done"`, `final` may be empty, and `rounds === maxRounds` tells that the limit was reached. Default
-   * `"tools"`: every call gets the tools.
+   * `"answer"`: the last model call that `maxRounds` allows is sent with `toolChoice: "none"` (the tools stay in the
+   * request), so the model has to answer in words; tool calls it returns anyway are ignored (they stay in that call's
+   * `llm_call` event). The run then stops with `"done"`, `final` may be empty, and `rounds === maxRounds` tells that the
+   * limit was reached. Default `"tools"`: every call gets the tools and the configured `toolChoice`.
    */
   readonly lastRound?: "tools" | "answer";
   readonly toolChoice?: ToolChoice;
@@ -221,15 +221,19 @@ export function createAgent(config: AgentConfig): AgentGraph {
     ...(config.retry && { retry: config.retry }),
     prompt: (s) => ({
       messages: [...(config.system ? [{ role: "system" as const, content: config.system }] : []), ...s.messages],
-      ...(!answerOnly(s) && specs.length > 0 && { tools: specs }),
-      ...(!answerOnly(s) && config.toolChoice && { toolChoice: config.toolChoice }),
+      ...(specs.length > 0 && { tools: specs }),
+      // The answer-only round keeps the tools, so the model still sees what its earlier calls were, and says "none":
+      // without tools in the request, some models (DeepSeek) write their tool-call markup into the answer instead.
+      ...(answerOnly(s)
+        ? specs.length > 0 && { toolChoice: "none" as const }
+        : config.toolChoice && { toolChoice: config.toolChoice }),
       ...(config.temperature !== undefined && { temperature: config.temperature }),
       ...(config.maxTokens !== undefined && { maxTokens: config.maxTokens }),
       ...(config.reasoning && { reasoning: config.reasoning }),
     }),
     update: (s, text, response) => {
       const round = s.rounds + 1;
-      // On the answer-only round the model was given no tools; calls it makes anyway are dropped.
+      // On the answer-only round the model was told not to call tools ("none"); calls it makes anyway are dropped.
       const asked = answerOnly(s) ? [] : (response.toolCalls ?? []);
       const calls = asked.map((c, i) => ({ ...c, id: c.id || `call_${round}_${i}` }));
       const run = calls.slice(0, AGENT_DEFAULTS.maxCallsPerReply);

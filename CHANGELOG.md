@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+### Fixed
+
+- `lastRound: "answer"` keeps the tools in the last request and sends `toolChoice: "none"`, instead of leaving both out. Given a history of tool calls and no tools, DeepSeek wrote its tool-call markup into the answer; Anthropic and Bedrock refuse such a request. An adapter used with `lastRound: "answer"` now has to support `toolChoice: "none"` (`taugraph/openai` does).
+
 ## [0.4.1] - 2026-11-26
 
 Two additions for apps built on the agent and on stored traces.
