@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-27
+
+Fixes the answer-only round of `lastRound: "answer"`, which DeepSeek answered with tool-call markup.
+
 ### Added
 
 - `createAgent({ lastRoundNote })`: the words of the user message that ends the `lastRound: "answer"` request, e.g. in your prompts' language. Default `AGENT_DEFAULTS.lastRoundNote`.
@@ -99,7 +103,8 @@ GitHub only, not published to npm.
 - Plugin nodes (`taugraph/nodes`): `CodeNode`, `LLMNode` with a provider-agnostic `LLMModel` contract and structured output.
 - Examples: quick start, retrieval with retry loop, OpenAI-compatible adapter.
 
-[Unreleased]: https://github.com/wangcao-hub/taugraph/compare/v0.4.1...HEAD
+[Unreleased]: https://github.com/wangcao-hub/taugraph/compare/v0.4.2...HEAD
+[0.4.2]: https://github.com/wangcao-hub/taugraph/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/wangcao-hub/taugraph/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/wangcao-hub/taugraph/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/wangcao-hub/taugraph/compare/v0.2.0...v0.3.0
