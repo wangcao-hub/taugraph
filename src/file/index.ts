@@ -45,6 +45,11 @@ export interface FileStore {
   load(runId: string): Trace | undefined;
   /** Every run in the directory, oldest change first. Files that cannot be read are skipped. */
   list(): StoredRun[];
+  /**
+   * Deletes a run's file; false if there is none. Refuses a run that a live process, or this store, is writing;
+   * a lock left by a process that died is taken over first, as for writing.
+   */
+  remove(runId: string): boolean;
 }
 
 const RUN_ID = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,127}$/;
@@ -403,6 +408,22 @@ export function fileStore(dir: string, options: FileStoreOptions = {}): FileStor
           }
         })
         .sort((a, b) => a.updatedAt - b.updatedAt);
+    },
+    remove(runId) {
+      checkRunId(runId);
+      const path = fileOf(runId);
+      if (!existsSync(path)) return false;
+      // Holding the lock keeps a writer from opening the run between the check above and the unlink.
+      const lock = acquire(runId);
+      try {
+        unlinkSync(path);
+        return true;
+      } catch (error) {
+        if (codeOf(error) === "ENOENT") return false;
+        throw error;
+      } finally {
+        releaseLock(lock);
+      }
     },
   };
 }

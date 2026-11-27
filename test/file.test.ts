@@ -1,6 +1,6 @@
 import { existsSync, mkdtempSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { fileStore } from "../src/file/index.js";
@@ -332,5 +332,51 @@ describe("fileStore", () => {
       `Run "${runId}" on disk ends at seq 2, but the next event is seq 5`,
     );
     expect(readFileSync(path)).toEqual(before);
+  });
+});
+
+describe("fileStore.remove", () => {
+  it("removes a finished run's file and nothing else", async () => {
+    const dir = temp();
+    const store = fileStore(dir);
+    const first = await graph.run({ n: 0 }, { onEvent: store.sink });
+    const second = await graph.run({ n: 5 }, { onEvent: store.sink });
+    expect(store.remove(first.runId)).toBe(true);
+    expect(store.load(first.runId)).toBeUndefined();
+    expect(store.list().map((r) => r.runId)).toEqual([second.runId]);
+    expect(readdirSync(dir)).toEqual([`${second.runId}.jsonl`]);
+    expect(store.remove(first.runId)).toBe(false);
+  });
+
+  it("refuses a run another live process is writing, and removes one whose writer died", async () => {
+    const dir = temp();
+    const { trace } = await graph.run({ n: 0 });
+    const runId = trace[0]?.runId as string;
+    crashed(dir, trace, 3);
+    const lock = join(dir, `${runId}.lock`);
+    writeFileSync(lock, String(process.ppid));
+    const store = fileStore(dir);
+    expect(() => store.remove(runId)).toThrow(`Run "${runId}" is being written by process ${process.ppid} (${lock})`);
+    expect(existsSync(join(dir, `${runId}.jsonl`))).toBe(true);
+    expect(readFileSync(lock, "utf8")).toBe(String(process.ppid));
+    writeFileSync(lock, String(DEAD_PID));
+    expect(store.remove(runId)).toBe(true);
+    expect(readdirSync(dir)).toEqual([]);
+  });
+
+  it("refuses a run it is writing itself", async () => {
+    const dir = temp();
+    const store = fileStore(dir);
+    const { trace } = await graph.run({ n: 0 });
+    const runId = trace[0]?.runId as string;
+    for (const event of trace.slice(0, 3)) store.sink(event);
+    expect(() => store.remove(runId)).toThrow(
+      `Run "${runId}" is being written by process ${process.pid} (${resolve(dir, `${runId}.lock`)})`,
+    );
+    expect(store.load(runId)).toHaveLength(3);
+  });
+
+  it("checks the runId", () => {
+    expect(() => fileStore(temp()).remove("a/b")).toThrow('Invalid runId "a/b"');
   });
 });
