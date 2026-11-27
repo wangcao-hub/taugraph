@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readdirSync, readFileSync, utimesSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -374,6 +374,25 @@ describe("fileStore.remove", () => {
       `Run "${runId}" is being written by process ${process.pid} (${resolve(dir, `${runId}.lock`)})`,
     );
     expect(store.load(runId)).toHaveLength(3);
+    for (const event of trace.slice(3)) store.sink(event);
+    expect(store.load(runId)).toEqual(JSON.parse(JSON.stringify(trace)));
+    expect(readdirSync(dir)).toEqual([`${runId}.jsonl`]);
+  });
+
+  it("refuses a run another store of this thread is writing, even after its lock file was deleted", async () => {
+    const dir = temp();
+    const a = fileStore(dir);
+    const { trace } = await graph.run({ n: 0 });
+    const runId = trace[0]?.runId as string;
+    for (const event of trace.slice(0, 3)) a.sink(event);
+    unlinkSync(join(dir, `${runId}.lock`));
+    expect(() => fileStore(dir).remove(runId)).toThrow(
+      `Run "${runId}" is being written by process ${process.pid} (${resolve(dir, `${runId}.lock`)})`,
+    );
+    for (const event of trace.slice(3)) a.sink(event);
+    const stored = a.load(runId);
+    expect(stored).toEqual(JSON.parse(JSON.stringify(trace)));
+    expect(runStatus(stored as Trace)).toBe("completed");
   });
 
   it("checks the runId", () => {

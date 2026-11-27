@@ -46,7 +46,7 @@ export interface FileStore {
   /** Every run in the directory, oldest change first. Files that cannot be read are skipped. */
   list(): StoredRun[];
   /**
-   * Deletes a run's file; false if there is none. Refuses a run that a live process, or this store, is writing;
+   * Deletes a run's file; false if there is none. Throws for a run that a live process, or this store, is writing;
    * a lock left by a process that died is taken over first, as for writing.
    */
   remove(runId: string): boolean;
@@ -413,8 +413,11 @@ export function fileStore(dir: string, options: FileStoreOptions = {}): FileStor
       checkRunId(runId);
       const path = fileOf(runId);
       if (!existsSync(path)) return false;
+      const lock = lockOf(runId);
+      // A store of this thread is writing the run, even if its lock file was deleted from outside.
+      if (held.has(lock)) throw new Error(`Run "${runId}" is being written by process ${process.pid} (${lock})`);
       // Holding the lock keeps a writer from opening the run between the check above and the unlink.
-      const lock = acquire(runId);
+      acquire(runId);
       try {
         unlinkSync(path);
         return true;
