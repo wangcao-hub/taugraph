@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-26
+
+Two additions for apps built on the agent and on stored traces.
+
 ### Added
 
 - `createAgent({ lastRound: "answer" })`: the last model call that `maxRounds` allows gets no `tools` and no `toolChoice`, so the model answers in words; tool calls it returns anyway are ignored. Default `"tools"`, the 0.4.0 behavior.
@@ -87,7 +91,8 @@ GitHub only, not published to npm.
 - Plugin nodes (`taugraph/nodes`): `CodeNode`, `LLMNode` with a provider-agnostic `LLMModel` contract and structured output.
 - Examples: quick start, retrieval with retry loop, OpenAI-compatible adapter.
 
-[Unreleased]: https://github.com/wangcao-hub/taugraph/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/wangcao-hub/taugraph/compare/v0.4.1...HEAD
+[0.4.1]: https://github.com/wangcao-hub/taugraph/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/wangcao-hub/taugraph/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/wangcao-hub/taugraph/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/wangcao-hub/taugraph/compare/v0.1.0...v0.2.0

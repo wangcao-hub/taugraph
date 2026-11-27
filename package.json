@@ -1,6 +1,6 @@
 {
   "name": "taugraph",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Minimal typed agent graph harness: a graph + typed-state kernel with append-only traces, replay and pause/resume. Zero runtime dependencies.",
   "keywords": [
     "agent",
