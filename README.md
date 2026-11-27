@@ -329,7 +329,7 @@ think ──no calls, or maxRounds──▶ finish
 - Tool definitions follow MCP (`name`, `description`, `inputSchema` as JSON Schema). A tool's JSON Schema comes from `inputSchema` if given, else from `input` through [Standard JSON Schema](https://standardschema.dev/json-schema) (Zod 4, Valibot, ArkType).
 - Invalid arguments, unknown tools, unreadable arguments and thrown errors go back to the model as error results; the loop continues.
 - `maxRounds` (default 8) bounds model calls; at most 32 calls run per reply. Each tool run is a `tool_call` event.
-- `lastRound: "answer"` makes the last model call that `maxRounds` allows go without tools, so the model has to answer in words; tool calls it returns anyway are ignored. Default `"tools"`.
+- `lastRound: "answer"` makes the last model call that `maxRounds` allows go without `tools` and `toolChoice`, so the model has to answer in words; tool calls it returns anyway are ignored (they stay in that call's `llm_call` event). The run then ends with `stop: "done"`, `final` may be empty, and `rounds === maxRounds` tells that the limit was reached. Some providers (Anthropic, Bedrock) refuse a request whose history has tool calls but that sends no tools. Default `"tools"`.
 - `timeoutMs` on `createAgent` limits each model call (`TIMEOUT`, which `retry` retries). `timeoutMs` on a tool limits each run of it: a read tool that takes longer answers the model with an error and the loop goes on; a write tool fails the run with `TIMEOUT`, because its effect is unknown.
 - Models: the call contract gained optional `tools`, `toolChoice` and `toolCalls`, and `tool` messages. An adapter that maps `role` itself needs a `tool` branch. The [OpenAI-compatible adapter](#openai-compatible-models-taugraphopenai) translates them. `pnpm example:agent` runs the whole thing. Tool results may carry images (see [Images](#images)).
 
@@ -449,7 +449,7 @@ for (const run of store.list()) {
 
 - Use one directory per graph: the recovery loop above resumes every interrupted run in the directory with one graph.
 - `list()` reports `running` (a live process holds the run's lock), `interrupted` (no end and nobody writing it), `paused`, `completed` or `failed`. It skips files it cannot read as a trace; `load` throws `INVALID_TRACE` for them.
-- `remove(runId)` deletes a run's file and returns whether there was one. It refuses a run that a live process, or this store, is writing.
+- `remove(runId)` deletes a run's file and returns whether there was one. It throws if a live process, or this store, is writing the run.
 - A crash can leave the last line half-written. `load` ignores it, and the store cuts it off before it continues the run. For a write step that was running, `resume` throws `UNKNOWN_OUTCOME` instead of running it again.
 - `durability` decides when to `fsync`: `"writes"` (default) before a write step runs, at a pause and at the end; `"every"` after each event; `"none"` never. With `"writes"`, a power cut can lose read steps, which are safe to run again, but cannot make a write step run twice. It can also lose a new run entirely if the run has not yet reached a write step, a pause or its end.
 - Each run has a lock file while it is written, so two processes cannot append to the same run. A lock left by a process that died is taken over.

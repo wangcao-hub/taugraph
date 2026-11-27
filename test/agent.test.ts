@@ -561,24 +561,51 @@ describe("lastRound", () => {
 
   it("asks without tools when maxRounds allows one call", async () => {
     const model = scripted([{ content: "好" }]);
-    const { state } = await createAgent({ model, tools: [weather], maxRounds: 1, lastRound: "answer" }).run(ask("hi"));
+    const agent = createAgent({ model, tools: [weather], toolChoice: "required", maxRounds: 1, lastRound: "answer" });
+    const { state } = await agent.run(ask("hi"));
     expect(model.requests[0]).not.toHaveProperty("tools");
+    expect(model.requests[0]).not.toHaveProperty("toolChoice");
     expect(state).toMatchObject({ final: "好", stop: "done" });
   });
 
   it("keeps the tools on every round by default", async () => {
-    const model = scripted([
+    const script = (): LLMResponse[] => [
       { content: "", toolCalls: [call("c1", "weather", { city: "南京" })] },
       { content: "", toolCalls: [call("c2", "weather", { city: "上海" })] },
-    ]);
-    const { state } = await createAgent({ model, tools: [weather], maxRounds: 2 }).run(ask("天气"));
-    expect(model.requests[1]?.tools).toHaveLength(1);
-    expect(state.stop).toBe("max_rounds");
+    ];
+    const runWith = async (lastRound?: "tools") => {
+      const model = scripted(script());
+      const agent = createAgent({ model, tools: [weather], maxRounds: 2, ...(lastRound && { lastRound }) });
+      const { state } = await agent.run(ask("天气"));
+      return { requests: model.requests, state };
+    };
+    const unset = await runWith();
+    const tools = await runWith("tools");
+    expect(unset.requests[1]?.tools).toHaveLength(1);
+    expect(unset.state.stop).toBe("max_rounds");
+    expect(tools.requests).toEqual(unset.requests);
+    expect(tools.state).toEqual(unset.state);
   });
 
   it("refuses other values", () => {
-    expect(() => createAgent({ model: scripted([]), lastRound: "none" as never })).toThrow(
-      'createAgent: lastRound must be "tools" or "answer", got none',
-    );
+    const make = () => createAgent({ model: scripted([]), lastRound: "none" as never });
+    expect(make).toThrow(TypeError);
+    expect(make).toThrow('createAgent: lastRound must be "tools" or "answer", got none');
+  });
+
+  it("decides the last round from the state, so a resumed run gets it right", async () => {
+    const model = scripted([
+      { content: "", toolCalls: [call("c1", "weather", { city: "南京" })] },
+      { content: "南京晴" },
+    ]);
+    const agent = createAgent({ model, tools: [weather], maxRounds: 2, lastRound: "answer", approve: () => "ask" });
+    const paused = await agent.run(ask("天气"));
+    expect(paused.status).toBe("paused");
+    const resumed = await agent.resume(paused.trace, true);
+    expect(model.requests).toHaveLength(2);
+    expect(model.requests[0]?.tools).toHaveLength(1);
+    expect(model.requests[1]).not.toHaveProperty("tools");
+    expect(resumed.status).toBe("completed");
+    expect(resumed.state).toMatchObject({ final: "南京晴", stop: "done", rounds: 2 });
   });
 });

@@ -84,8 +84,10 @@ export interface AgentConfig {
   /** Model calls allowed in one run. Default 8. */
   readonly maxRounds?: number;
   /**
-   * `"answer"`: the last model call that `maxRounds` allows gets no tools, so the model has to answer in words; tool
-   * calls it returns anyway are ignored. Default `"tools"`: every call gets the tools.
+   * `"answer"`: the last model call that `maxRounds` allows goes without `tools` and `toolChoice`, so the model has to
+   * answer in words; tool calls it returns anyway are ignored (they stay in that call's `llm_call` event). The run then
+   * stops with `"done"`, `final` may be empty, and `rounds === maxRounds` tells that the limit was reached. Default
+   * `"tools"`: every call gets the tools.
    */
   readonly lastRound?: "tools" | "answer";
   readonly toolChoice?: ToolChoice;

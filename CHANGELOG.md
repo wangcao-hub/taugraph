@@ -7,7 +7,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ### Added
 
 - `createAgent({ lastRound: "answer" })`: the last model call that `maxRounds` allows gets no `tools` and no `toolChoice`, so the model answers in words; tool calls it returns anyway are ignored. Default `"tools"`, the 0.4.0 behavior.
-- `fileStore(dir).remove(runId)` deletes a run's file and returns whether there was one; it refuses a run that a live process or the store itself is writing.
+- `fileStore(dir).remove(runId)` deletes a run's file and returns whether there was one; it throws for a run that a live process or the store itself is writing.
 
 ## [0.4.0] - 2026-11-26
 
