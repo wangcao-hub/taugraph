@@ -537,3 +537,48 @@ describe("timeouts", () => {
     );
   });
 });
+
+describe("lastRound", () => {
+  it("sends no tools on the last round and takes its words as the answer", async () => {
+    const model = scripted([
+      { content: "", toolCalls: [call("c1", "weather", { city: "南京" })] },
+      { content: "南京晴", toolCalls: [call("c2", "weather", { city: "上海" })] },
+    ]);
+    const agent = createAgent({ model, tools: [weather], toolChoice: "auto", maxRounds: 2, lastRound: "answer" });
+    const { state, path, trace } = await agent.run(ask("天气"));
+    expect(model.requests[0]).toMatchObject({
+      toolChoice: "auto",
+      tools: [expect.objectContaining({ name: "weather" })],
+    });
+    expect(model.requests[1]).not.toHaveProperty("tools");
+    expect(model.requests[1]).not.toHaveProperty("toolChoice");
+    expect(path).toEqual(["think", "act", "think", "finish"]);
+    expect(state).toMatchObject({ final: "南京晴", stop: "done", rounds: 2, pending: [] });
+    expect(state.messages.at(-1)).toEqual({ role: "assistant", content: "南京晴", model: "mock:agent" });
+    expect(trace.filter((e) => e.type === "llm_call")).toHaveLength(2);
+    expect(trace.filter((e) => e.type === "tool_call")).toHaveLength(1);
+  });
+
+  it("asks without tools when maxRounds allows one call", async () => {
+    const model = scripted([{ content: "好" }]);
+    const { state } = await createAgent({ model, tools: [weather], maxRounds: 1, lastRound: "answer" }).run(ask("hi"));
+    expect(model.requests[0]).not.toHaveProperty("tools");
+    expect(state).toMatchObject({ final: "好", stop: "done" });
+  });
+
+  it("keeps the tools on every round by default", async () => {
+    const model = scripted([
+      { content: "", toolCalls: [call("c1", "weather", { city: "南京" })] },
+      { content: "", toolCalls: [call("c2", "weather", { city: "上海" })] },
+    ]);
+    const { state } = await createAgent({ model, tools: [weather], maxRounds: 2 }).run(ask("天气"));
+    expect(model.requests[1]?.tools).toHaveLength(1);
+    expect(state.stop).toBe("max_rounds");
+  });
+
+  it("refuses other values", () => {
+    expect(() => createAgent({ model: scripted([]), lastRound: "none" as never })).toThrow(
+      'createAgent: lastRound must be "tools" or "answer", got none',
+    );
+  });
+});

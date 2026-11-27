@@ -83,6 +83,11 @@ export interface AgentConfig {
   readonly system?: string;
   /** Model calls allowed in one run. Default 8. */
   readonly maxRounds?: number;
+  /**
+   * `"answer"`: the last model call that `maxRounds` allows gets no tools, so the model has to answer in words; tool
+   * calls it returns anyway are ignored. Default `"tools"`: every call gets the tools.
+   */
+  readonly lastRound?: "tools" | "answer";
   readonly toolChoice?: ToolChoice;
   readonly temperature?: number;
   readonly maxTokens?: number;
@@ -192,6 +197,12 @@ export function createAgent(config: AgentConfig): AgentGraph {
   const maxRounds = config.maxRounds ?? AGENT_DEFAULTS.maxRounds;
   if (!Number.isInteger(maxRounds) || maxRounds < 1)
     throw new TypeError("createAgent: maxRounds must be an integer >= 1");
+  const lastRound = config.lastRound ?? "tools";
+  if (lastRound !== "tools" && lastRound !== "answer") {
+    throw new TypeError(`createAgent: lastRound must be "tools" or "answer", got ${String(config.lastRound)}`);
+  }
+  /** Whether the call made from this state is the last one allowed and must be answered in words. */
+  const answerOnly = (s: AgentState) => lastRound === "answer" && s.rounds === maxRounds - 1;
   if (badTimeout(config.timeoutMs)) {
     throw new TypeError(
       `createAgent: timeoutMs must be an integer from 1 to ${MAX_TIMEOUT}, got ${String(config.timeoutMs)}`,
@@ -208,15 +219,17 @@ export function createAgent(config: AgentConfig): AgentGraph {
     ...(config.retry && { retry: config.retry }),
     prompt: (s) => ({
       messages: [...(config.system ? [{ role: "system" as const, content: config.system }] : []), ...s.messages],
-      ...(specs.length > 0 && { tools: specs }),
-      ...(config.toolChoice && { toolChoice: config.toolChoice }),
+      ...(!answerOnly(s) && specs.length > 0 && { tools: specs }),
+      ...(!answerOnly(s) && config.toolChoice && { toolChoice: config.toolChoice }),
       ...(config.temperature !== undefined && { temperature: config.temperature }),
       ...(config.maxTokens !== undefined && { maxTokens: config.maxTokens }),
       ...(config.reasoning && { reasoning: config.reasoning }),
     }),
     update: (s, text, response) => {
       const round = s.rounds + 1;
-      const calls = (response.toolCalls ?? []).map((c, i) => ({ ...c, id: c.id || `call_${round}_${i}` }));
+      // On the answer-only round the model was given no tools; calls it makes anyway are dropped.
+      const asked = answerOnly(s) ? [] : (response.toolCalls ?? []);
+      const calls = asked.map((c, i) => ({ ...c, id: c.id || `call_${round}_${i}` }));
       const run = calls.slice(0, AGENT_DEFAULTS.maxCallsPerReply);
       const assistant: ChatMessage = {
         role: "assistant",
